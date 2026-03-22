@@ -44,13 +44,10 @@ file_read_tool = FileReadTool()
 search_tool = SerperDevTool()
 
 
-@tool
-def gemini_voice_tool(script: str) -> str:
-    """
-    Use this tool to generate a voice for the text.
-    """
+def synthesize_podcast_wav(script: str) -> str:
+    """Generate podcast WAV via Gemini TTS; used by the tool and by the scripting task callback."""
     client = genai.Client(api_key=(os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")))
-    
+
     response = client.models.generate_content(
         model=os.getenv("GEMINI_MODEL"),
         contents=script,
@@ -59,28 +56,28 @@ def gemini_voice_tool(script: str) -> str:
             speech_config=types.SpeechConfig(
                 multi_speaker_voice_config=types.MultiSpeakerVoiceConfig(
                     speaker_voice_configs=[
-                    types.SpeakerVoiceConfig(
-                        speaker='Joe',
-                        voice_config=types.VoiceConfig(
-                            prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                                voice_name='Kore',
+                        types.SpeakerVoiceConfig(
+                            speaker='Joe',
+                            voice_config=types.VoiceConfig(
+                                prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                                    voice_name='Kore',
+                                )
                             )
-                        )
-                    ),
-                    types.SpeakerVoiceConfig(
-                        speaker='Jane',
-                        voice_config=types.VoiceConfig(
-                            prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                                voice_name='Puck',
+                        ),
+                        types.SpeakerVoiceConfig(
+                            speaker='Jane',
+                            voice_config=types.VoiceConfig(
+                                prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                                    voice_name='Puck',
+                                )
                             )
-                        )
-                    ),
+                        ),
                     ]
                 )
             )
         )
     )
-    
+
     parts = getattr(response.candidates[0].content, 'parts', [])
     inline = None
     for p in parts:
@@ -101,11 +98,18 @@ def gemini_voice_tool(script: str) -> str:
     if not audio_bytes:
         raise ValueError("Gemini returned empty audio data.")
 
-    # Ensure output directory exists and create a unique filename
     output_dir = os.path.join(os.getcwd(), "outputs")
     os.makedirs(output_dir, exist_ok=True)
     timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    topic_slug = (os.getenv("TOPIC")).lower().replace(" ", "-")
+    topic_slug = (os.getenv("TOPIC") or "podcast").lower().replace(" ", "-")
     filename = os.path.join(output_dir, f"{topic_slug}-podcast-{timestamp}.wav")
     wave_file(filename, audio_bytes)
     return filename
+
+
+@tool
+def gemini_voice_tool(script: str) -> str:
+    """
+    Use this tool to generate a voice for the text.
+    """
+    return synthesize_podcast_wav(script)

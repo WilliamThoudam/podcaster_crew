@@ -21,5 +21,7 @@ scripting_task:
     Review the report and plan, and write an elaborate podcast script between two hosts
     who are knowledgable about the topic and yet are fun on podcast
   expected_output: >
-    A full script with speaker labels, sound effects, laughs, silences, and every last bit of details. Pass that to gemini voice tool to generate and save podcast. "Jone" and "Jane" are the speakers, give them dialogues by name.
+    A full script with speaker labels, sound effects, laughs, silences, and every last bit of details.
+    "Jone" and "Jane" are the speakers, give them dialogues by name.
+    Do not write separate script files yourself; the task output is saved under outputs/ automatically and audio is generated from it after this task.
   agent: scriptwriter

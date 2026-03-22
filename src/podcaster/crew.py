@@ -3,9 +3,21 @@ from crewai.project import CrewBase, agent, crew, task, before_kickoff
 from crewai.agents.agent_builder.base_agent import BaseAgent
 from functools import lru_cache
 from typing import List
-from .tools import search_tool, file_writer_tool, file_read_tool, gemini_voice_tool
+from .tools import file_read_tool
+from .tools.custom_tool import synthesize_podcast_wav
 import os
 from datetime import datetime
+
+
+def _tts_after_scripting_task(output: object) -> None:
+    """Agents often finish with text without calling tools; always run TTS on the final script."""
+    text = getattr(output, "raw", None)
+    if not text:
+        return
+    text = str(text).strip()
+    if len(text) < 80:
+        return
+    synthesize_podcast_wav(text)
 
 
 @lru_cache(maxsize=1)
@@ -62,7 +74,9 @@ class Podcaster():
             config=self.agents_config['scriptwriter'], # type: ignore[index]
             verbose=True,
             llm=_openai_compatible_llm(),
-            tools=[file_writer_tool, file_read_tool, gemini_voice_tool]
+            # No file_writer_tool: agents often save ad-hoc names at repo root (e.g. *_podcast_script.txt).
+            # Script is already written by this task's output_file under outputs/.
+            tools=[file_read_tool],
         )
     
     
@@ -82,7 +96,7 @@ class Podcaster():
     @task
     def reporting_task(self) -> Task:
         timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
-        topic_slug = (os.getenv("TOPIC")).lower().replace(" ", "-")
+        topic_slug = (os.getenv("TOPIC") or "topic").lower().replace(" ", "-")
         report_path = os.path.join('outputs', f'{topic_slug}-report-{timestamp}.md')
         return Task(
             config=self.tasks_config['reporting_task'], # type: ignore[index]
@@ -93,11 +107,12 @@ class Podcaster():
     @task
     def scripting_task(self) -> Task:
         timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
-        topic_slug = (os.getenv("TOPIC")).lower().replace(" ", "-")
+        topic_slug = (os.getenv("TOPIC") or "topic").lower().replace(" ", "-")
         script_path = os.path.join('outputs', f'{topic_slug}-script-{timestamp}.md')
         return Task(
             config=self.tasks_config['scripting_task'], # type: ignore[index]
-            output_file=script_path
+            output_file=script_path,
+            callback=_tts_after_scripting_task,
         )
 
     @crew

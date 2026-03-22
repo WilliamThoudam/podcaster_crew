@@ -1,0 +1,15 @@
+services:
+  podcaster:
+    build: .
+    env_file:
+      - .env
+    environment:
+      PYTHONUNBUFFERED: "1"
+      # uv cannot hardlink across image layers vs bind mounts; copy avoids warnings and odd behavior
+      UV_LINK_MODE: copy
+    volumes:
+      - .:/app
+    working_dir: /app
+    # Use run_crew (pyproject console script) so we use the image's pip install — not `crewai run`,
+    # which runs `uv sync` and re-downloads a huge stack (playwright, pyarrow, etc.) every time.
+    command: ["run_crew"]

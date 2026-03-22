@@ -6,6 +6,8 @@ from datetime import datetime
 
 from podcaster.crew import Podcaster
 
+import os
+
 warnings.filterwarnings("ignore", category=SyntaxWarning, module="pysbd")
 
 # This main file is intended to be a way for you to run your
@@ -18,7 +20,7 @@ def run():
     Run the crew.
     """
     inputs = {
-        'topic': 'AI LLMs',
+        'topic': os.getenv('TOPIC'),
         'current_month': str(datetime.now().month),
         'current_year': str(datetime.now().year)
     }
@@ -34,7 +36,7 @@ def train():
     Train the crew for a given number of iterations.
     """
     inputs = {
-        "topic": "AI LLMs",
+        "topic": os.getenv('TOPIC'),
         'current_month': str(datetime.now().month),
         'current_year': str(datetime.now().year)
     }
@@ -59,7 +61,7 @@ def test():
     Test the crew execution and returns the results.
     """
     inputs = {
-        "topic": "AI LLMs",
+        "topic": os.getenv('TOPIC'),
         "current_year": str(datetime.now().year)
     }
     

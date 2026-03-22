@@ -27,9 +27,13 @@ crewai install
 ```
 MODEL=gpt-4.1-mini-2025-04-14
 OPENAI_API_KEY=sk-
+# Optional: any OpenAI-compatible Chat Completions API (OpenRouter, LM Studio, vLLM, etc.)
+# OPENAI_BASE_URL=https://openrouter.ai/api/v1
 GEMINI_API_KEY=
 SERPER_API_KEY=
 ```
+
+When using a custom `OPENAI_BASE_URL`, set `MODEL` to whatever that provider expects (for example OpenRouter uses names like `openai/gpt-4o-mini` or `meta-llama/llama-3.3-70b-instruct`). `OPENAI_API_KEY` is sent as the Bearer token; use a placeholder if the server does not require a key.
 
 You'll need to add credits for these:
 OpenAI API Key: https://platform.openai.com/api-keys

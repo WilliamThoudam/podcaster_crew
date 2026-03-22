@@ -1,10 +1,25 @@
-from crewai import Agent, Crew, Process, Task
+from crewai import Agent, Crew, LLM, Process, Task
 from crewai.project import CrewBase, agent, crew, task, before_kickoff
 from crewai.agents.agent_builder.base_agent import BaseAgent
+from functools import lru_cache
 from typing import List
 from .tools import search_tool, file_writer_tool, file_read_tool, gemini_voice_tool
 import os
 from datetime import datetime
+
+
+@lru_cache(maxsize=1)
+def _openai_compatible_llm() -> LLM:
+    """
+    Uses MODEL and OPENAI_API_KEY from the environment.
+    Set OPENAI_BASE_URL to any OpenAI-compatible completions API (OpenRouter, LM Studio, vLLM, etc.).
+    """
+    model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini-2025-04-14")
+    base_url = (os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1").strip() or None
+    kwargs = {"model": model}
+    if base_url:
+        kwargs["base_url"] = base_url.rstrip("/")
+    return LLM(**kwargs)
 
 # If you want to run a snippet of code before or after the crew starts,
 # you can use the @before_kickoff and @after_kickoff decorators
@@ -28,6 +43,7 @@ class Podcaster():
         return Agent(
             config=self.agents_config['researcher'], # type: ignore[index]
             verbose=True,
+            llm=_openai_compatible_llm(),
             # tools=[search_tool, file_writer_tool, file_read_tool]
         )
 
@@ -36,6 +52,7 @@ class Podcaster():
         return Agent(
             config=self.agents_config['reporting_analyst'], # type: ignore[index]
             verbose=True,
+            llm=_openai_compatible_llm(),
             # tools=[file_writer_tool, file_read_tool]
         )
 
@@ -44,6 +61,7 @@ class Podcaster():
         return Agent(
             config=self.agents_config['scriptwriter'], # type: ignore[index]
             verbose=True,
+            llm=_openai_compatible_llm(),
             tools=[file_writer_tool, file_read_tool, gemini_voice_tool]
         )
     
@@ -52,8 +70,9 @@ class Podcaster():
     # task dependencies, and task callbacks, check out the documentation:
     # https://docs.crewai.com/concepts/tasks#overview-of-a-task
     @before_kickoff
-    def _ensure_outputs_dir(self):
+    def _ensure_outputs_dir(self, inputs):
         os.makedirs(os.path.join(os.getcwd(), 'outputs'), exist_ok=True)
+        return inputs
     @task
     def research_task(self) -> Task:
         return Task(
@@ -63,7 +82,8 @@ class Podcaster():
     @task
     def reporting_task(self) -> Task:
         timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
-        report_path = os.path.join('outputs', f'report-{timestamp}.md')
+        topic_slug = (os.getenv("TOPIC")).lower().replace(" ", "-")
+        report_path = os.path.join('outputs', f'{topic_slug}-report-{timestamp}.md')
         return Task(
             config=self.tasks_config['reporting_task'], # type: ignore[index]
             output_file=report_path
@@ -73,7 +93,8 @@ class Podcaster():
     @task
     def scripting_task(self) -> Task:
         timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
-        script_path = os.path.join('outputs', f'script-{timestamp}.md')
+        topic_slug = (os.getenv("TOPIC")).lower().replace(" ", "-")
+        script_path = os.path.join('outputs', f'{topic_slug}-script-{timestamp}.md')
         return Task(
             config=self.tasks_config['scripting_task'], # type: ignore[index]
             output_file=script_path

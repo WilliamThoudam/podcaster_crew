@@ -52,7 +52,7 @@ def gemini_voice_tool(script: str) -> str:
     client = genai.Client(api_key=(os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")))
     
     response = client.models.generate_content(
-        model="gemini-2.5-flash-preview-tts",
+        model=os.getenv("GEMINI_MODEL"),
         contents=script,
         config=types.GenerateContentConfig(
             response_modalities=["AUDIO"],
@@ -105,6 +105,7 @@ def gemini_voice_tool(script: str) -> str:
     output_dir = os.path.join(os.getcwd(), "outputs")
     os.makedirs(output_dir, exist_ok=True)
     timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    filename = os.path.join(output_dir, f"podcast-{timestamp}.wav")
+    topic_slug = (os.getenv("TOPIC")).lower().replace(" ", "-")
+    filename = os.path.join(output_dir, f"{topic_slug}-podcast-{timestamp}.wav")
     wave_file(filename, audio_bytes)
     return filename

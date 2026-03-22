@@ -44,13 +44,21 @@ file_read_tool = FileReadTool()
 search_tool = SerperDevTool()
 
 
+def _tts_host_names() -> tuple[str, str]:
+    """Labels must match dialogue lines in the script (e.g. 'Alex: ...'). Set in .env."""
+    male = (os.getenv("MALE_HOST") or "Jone").strip()
+    female = (os.getenv("FEMALE_HOST") or "Jane").strip()
+    return male, female
+
+
 @tool
 def gemini_voice_tool(script: str) -> str:
     """
     Use this tool to generate a voice for the text.
     """
+    male_host, female_host = _tts_host_names()
     client = genai.Client(api_key=(os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")))
-    
+
     response = client.models.generate_content(
         model=os.getenv("GEMINI_MODEL"),
         contents=script,
@@ -59,22 +67,23 @@ def gemini_voice_tool(script: str) -> str:
             speech_config=types.SpeechConfig(
                 multi_speaker_voice_config=types.MultiSpeakerVoiceConfig(
                     speaker_voice_configs=[
-                    types.SpeakerVoiceConfig(
-                        speaker='Joe',
-                        voice_config=types.VoiceConfig(
-                            prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                                voice_name='Kore',
+                        types.SpeakerVoiceConfig(
+                            speaker=male_host,
+                            voice_config=types.VoiceConfig(
+                                prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                                    # Puck = male, Kore = female in Gemini prebuilt catalog (do not swap).
+                                    voice_name=os.getenv("GEMINI_VOICE_MALE", "Puck"),
+                                )
                             )
-                        )
-                    ),
-                    types.SpeakerVoiceConfig(
-                        speaker='Jane',
-                        voice_config=types.VoiceConfig(
-                            prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                                voice_name='Puck',
+                        ),
+                        types.SpeakerVoiceConfig(
+                            speaker=female_host,
+                            voice_config=types.VoiceConfig(
+                                prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                                    voice_name=os.getenv("GEMINI_VOICE_FEMALE", "Kore"),
+                                )
                             )
-                        )
-                    ),
+                        ),
                     ]
                 )
             )
@@ -105,7 +114,7 @@ def gemini_voice_tool(script: str) -> str:
     output_dir = os.path.join(os.getcwd(), "outputs")
     os.makedirs(output_dir, exist_ok=True)
     timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    topic_slug = (os.getenv("TOPIC")).lower().replace(" ", "-")
+    topic_slug = (os.getenv("TOPIC") or "podcast").lower().replace(" ", "-")
     filename = os.path.join(output_dir, f"{topic_slug}-podcast-{timestamp}.wav")
     wave_file(filename, audio_bytes)
     return filename

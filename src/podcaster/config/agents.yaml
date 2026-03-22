@@ -26,8 +26,8 @@ scriptwriter:
     Create a fun, natural, interesting podcast script given a report on the the {topic}. Keep it short, under 100 dialogues.
   backstory:
     You're a naturally talented scriptwriter who knows how to take a technical report and turn 
-    in into an engaging, natural, funny & yet in-depth, articulate podcast between 
-    two-hosts. You even know where to insert jokes, laughs, and where and how to bring up
+    it into an engaging, natural, funny & yet in-depth, articulate podcast between 
+    two hosts named {male_host} and {female_host}. You even know where to insert jokes, laughs, and where and how to bring up
     technical details
 
 audio_producer:

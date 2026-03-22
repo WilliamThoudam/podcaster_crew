@@ -10,6 +10,18 @@ import os
 
 warnings.filterwarnings("ignore", category=SyntaxWarning, module="pysbd")
 
+
+def _crew_inputs() -> dict:
+    """Shared kickoff inputs; host names match .env (MALE_HOST / FEMALE_HOST)."""
+    return {
+        "topic": os.getenv("TOPIC"),
+        "current_month": str(datetime.now().month),
+        "current_year": str(datetime.now().year),
+        "male_host": os.getenv("MALE_HOST", "Jone"),
+        "female_host": os.getenv("FEMALE_HOST", "Jane"),
+    }
+
+
 # This main file is intended to be a way for you to run your
 # crew locally, so refrain from adding unnecessary logic into this file.
 # Replace with inputs you want to test with, it will automatically
@@ -19,12 +31,8 @@ def run():
     """
     Run the crew.
     """
-    inputs = {
-        'topic': os.getenv('TOPIC'),
-        'current_month': str(datetime.now().month),
-        'current_year': str(datetime.now().year)
-    }
-    
+    inputs = _crew_inputs()
+
     try:
         Podcaster().crew().kickoff(inputs=inputs)
     except Exception as e:
@@ -35,11 +43,7 @@ def train():
     """
     Train the crew for a given number of iterations.
     """
-    inputs = {
-        "topic": os.getenv('TOPIC'),
-        'current_month': str(datetime.now().month),
-        'current_year': str(datetime.now().year)
-    }
+    inputs = _crew_inputs()
     try:
         Podcaster().crew().train(n_iterations=int(sys.argv[1]), filename=sys.argv[2], inputs=inputs)
 
@@ -60,11 +64,8 @@ def test():
     """
     Test the crew execution and returns the results.
     """
-    inputs = {
-        "topic": os.getenv('TOPIC'),
-        "current_year": str(datetime.now().year)
-    }
-    
+    inputs = _crew_inputs()
+
     try:
         Podcaster().crew().test(n_iterations=int(sys.argv[1]), eval_llm=sys.argv[2], inputs=inputs)
 

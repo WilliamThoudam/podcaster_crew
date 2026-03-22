@@ -22,7 +22,7 @@ scripting_task:
     who are knowledgable about the topic and yet are fun on podcast
   expected_output: >
     A full script with speaker labels, sound effects, laughs, silences, and every last bit of details.
-    "Jone" and "Jane" are the speakers, give them dialogues by name.
+    "{male_host}" and "{female_host}" are the speakers, give them dialogues by name.
     Do not write separate script files yourself; the task output is saved under outputs/ automatically.
   agent: scriptwriter
 

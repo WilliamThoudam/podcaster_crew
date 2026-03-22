@@ -31,6 +31,12 @@ OPENAI_API_KEY=sk-
 # OPENAI_BASE_URL=https://openrouter.ai/api/v1
 GEMINI_API_KEY=
 SERPER_API_KEY=
+# Podcast host names (used in scripts and Gemini multi-speaker TTS)
+MALE_HOST=Jone
+FEMALE_HOST=Jane
+# Optional: Gemini prebuilt voices (defaults: Puck=male, Kore=female per Gemini catalog)
+# GEMINI_VOICE_MALE=Puck
+# GEMINI_VOICE_FEMALE=Kore
 ```
 
 When using a custom `OPENAI_BASE_URL`, set `MODEL` to whatever that provider expects (for example OpenRouter uses names like `openai/gpt-4o-mini` or `meta-llama/llama-3.3-70b-instruct`). `OPENAI_API_KEY` is sent as the Bearer token; use a placeholder if the server does not require a key.

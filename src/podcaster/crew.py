@@ -4,20 +4,9 @@ from crewai.agents.agent_builder.base_agent import BaseAgent
 from functools import lru_cache
 from typing import List
 from .tools import file_read_tool
-from .tools.custom_tool import synthesize_podcast_wav
+from .tools.custom_tool import gemini_voice_tool
 import os
 from datetime import datetime
-
-
-def _tts_after_scripting_task(output: object) -> None:
-    """Agents often finish with text without calling tools; always run TTS on the final script."""
-    text = getattr(output, "raw", None)
-    if not text:
-        return
-    text = str(text).strip()
-    if len(text) < 80:
-        return
-    synthesize_podcast_wav(text)
 
 
 @lru_cache(maxsize=1)
@@ -78,7 +67,17 @@ class Podcaster():
             # Script is already written by this task's output_file under outputs/.
             tools=[file_read_tool],
         )
-    
+
+    @agent
+    def audio_producer(self) -> Agent:
+        return Agent(
+            config=self.agents_config['audio_producer'],  # type: ignore[index]
+            verbose=True,
+            llm=_openai_compatible_llm(),
+            tools=[gemini_voice_tool],
+            allow_delegation=False,
+        )
+
     
     # To learn more about structured task outputs,
     # task dependencies, and task callbacks, check out the documentation:
@@ -112,7 +111,13 @@ class Podcaster():
         return Task(
             config=self.tasks_config['scripting_task'], # type: ignore[index]
             output_file=script_path,
-            callback=_tts_after_scripting_task,
+        )
+
+    @task
+    def audio_task(self) -> Task:
+        return Task(
+            config=self.tasks_config['audio_task'],  # type: ignore[index]
+            context=[self.scripting_task()],
         )
 
     @crew

@@ -1,0 +1,4 @@
+/* Global resets — Pulsecast page styles live in pages/Pulsecast/pulsecast.css */
+#root {
+  min-height: 100vh;
+}

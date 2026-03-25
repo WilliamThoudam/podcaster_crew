@@ -31,6 +31,7 @@ audio_task:
     You receive the completed podcast script from the previous task (same content as saved under outputs/).
     Your only job is to call the gemini_voice_tool once with the entire script as the `script` argument
     (all dialogue lines, verbatim). Do not summarize or shorten. Report the WAV file path the tool returns.
+    (TTS backend is chosen via TTS_PROVIDER in .env: gemini or coqui.)
   expected_output: >
     The absolute or relative path to the generated .wav file from gemini_voice_tool, and confirmation audio was created.
   agent: audio_producer

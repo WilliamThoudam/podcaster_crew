@@ -1,0 +1,38 @@
+export type Screen = 'dashboard' | 'player' | 'transcript' | 'interaction'
+
+export const PULSECAST_SCREENS = [
+  'dashboard',
+  'player',
+  'transcript',
+  'interaction',
+] as const satisfies readonly Screen[]
+
+export function isPulsecastScreen(param: string | undefined): param is Screen {
+  return param != null && (PULSECAST_SCREENS as readonly string[]).includes(param)
+}
+
+export type AgentState = 'idle' | 'thinking' | 'active'
+
+export type PodcastRole =
+  | 'HOST'
+  | 'ANALYST'
+  | 'MARKETING'
+  | 'FINANCE'
+  | 'CHALLENGER'
+
+export type PodcastLine = {
+  role: PodcastRole
+  emoji: string
+  color: string
+  text: string
+}
+
+export type QaMessage = {
+  id: string
+  kind: 'system' | 'user' | 'agent'
+  role: string
+  emoji: string
+  color: string
+  text: string
+  sql?: string
+}

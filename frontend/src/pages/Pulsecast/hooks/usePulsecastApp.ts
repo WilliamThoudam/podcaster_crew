@@ -39,6 +39,16 @@ const QA_INSIGHT_STYLE: Record<PodcastRole, { emoji: string; color: string }> = 
   CHALLENGER: { emoji: '⚖️', color: 'var(--challenger)' },
 }
 
+const ROLE_TO_AGENT_INDEX: Record<PodcastRole, number> = {
+  HOST: 0,
+  ANALYST: 1,
+  MARKETING: 2,
+  FINANCE: 3,
+  CHALLENGER: 4,
+}
+
+const ROLE_TO_UI_META: Record<PodcastRole, { emoji: string; color: string }> = QA_INSIGHT_STYLE
+
 function insightToMessage(ins: AgentInsight, generatedSql: string): QaMessage {
   const role = ins.role in QA_INSIGHT_STYLE ? ins.role : 'ANALYST'
   const style = QA_INSIGHT_STYLE[role as PodcastRole]
@@ -63,6 +73,7 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
 
   const [qaInput, setQaInput] = useState('')
   const qaSessionRef = useRef<string | null>(null)
+  const streamingMsgIdsRef = useRef<Partial<Record<PodcastRole, string>>>({})
   const [qaMessages, setQaMessages] = useState<QaMessage[]>([])
 
   const [agentStates, setAgentStates] = useState<AgentState[]>(() => AGENTS.map(() => 'idle'))
@@ -256,6 +267,7 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
       setSqlLog('// Streaming OpenAI completion…')
       try {
         let streamedChars = 0
+        let streamedAgentMessages = false
         const conversation = [
           ...qaMessages
             .filter((m) => m.kind === 'user' && m.role === 'YOU' && typeof m.text === 'string')
@@ -268,22 +280,68 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
             session_id: qaSessionRef.current,
             messages: conversation,
           },
-          (delta) => {
-            streamedChars += delta.length
-            if (streamedChars % 256 < delta.length) {
-              setSqlLog(`// Streaming OpenAI completion… ${streamedChars} chars`)
-            }
+          {
+            onDelta: (delta) => {
+              streamedChars += delta.length
+              if (streamedChars % 256 < delta.length) {
+                setSqlLog(`// Streaming OpenAI completion… ${streamedChars} chars`)
+              }
+            },
+            onAgentStatus: (agent, state) => {
+              const idx = ROLE_TO_AGENT_INDEX[agent]
+              setAgentStates((prev) => {
+                const next: AgentState[] = [...prev]
+                next[idx] = state
+                return next
+              })
+            },
+            onAgentMessageStart: (agent) => {
+              streamedAgentMessages = true
+              const id = newId()
+              streamingMsgIdsRef.current[agent] = id
+              const meta = ROLE_TO_UI_META[agent]
+              setQaMessages((m) => [
+                ...m,
+                {
+                  id,
+                  kind: 'agent',
+                  role: agent,
+                  emoji: meta.emoji,
+                  color: meta.color,
+                  text: '',
+                },
+              ])
+            },
+            onAgentTextDelta: (agent, delta) => {
+              const targetId = streamingMsgIdsRef.current[agent]
+              if (!targetId) return
+              setQaMessages((m) =>
+                m.map((msg) => (msg.id === targetId ? { ...msg, text: `${msg.text}${delta}` } : msg)),
+              )
+            },
+            onAgentMessageDone: (agent) => {
+              delete streamingMsgIdsRef.current[agent]
+            },
+            onFinalPayload: (payload) => {
+              const ran = payload.execute.query ?? payload.generated_sql
+              setSqlLog(ran)
+            },
+            onStreamError: (message) => {
+              setSqlLog(`// Error: ${message}`)
+            },
           },
         )
         setSqlLog('// Generating SQL query…')
         const ran = result.execute.query ?? result.generated_sql
         setSqlLog(ran)
         setAgentStates(AGENTS.map(() => 'idle'))
-        const insights =
-          result.agent_messages && result.agent_messages.length > 0
-            ? result.agent_messages
-            : [{ role: 'ANALYST' as const, text: result.answer }]
-        setQaMessages((m) => [...m, ...insights.map((ins) => insightToMessage(ins, result.generated_sql))])
+        if (!streamedAgentMessages) {
+          const insights =
+            result.agent_messages && result.agent_messages.length > 0
+              ? result.agent_messages
+              : [{ role: 'ANALYST' as const, text: result.answer }]
+          setQaMessages((m) => [...m, ...insights.map((ins) => insightToMessage(ins, result.generated_sql))])
+        }
         const synth = window.speechSynthesis
         if (synth) {
           synth.cancel()
@@ -294,6 +352,7 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
         window.setTimeout(() => showToast('▶ Podcast resuming from live point…'), 1000)
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e)
+        streamingMsgIdsRef.current = {}
         setSqlLog(`// Error: ${msg}`)
         setAgentStates(AGENTS.map(() => 'idle'))
         setQaMessages((m) => [

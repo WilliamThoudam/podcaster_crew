@@ -89,6 +89,45 @@ type OpenAIChunk = {
   choices: OpenAIChunkChoice[]
 }
 
+type StreamEventPayload =
+  | { event: 'agent_status'; agent: 'HOST' | 'ANALYST' | 'MARKETING' | 'FINANCE' | 'CHALLENGER'; state: 'thinking' | 'idle' | 'active' }
+  | { event: 'agent_message_start'; agent: 'HOST' | 'ANALYST' | 'MARKETING' | 'FINANCE' | 'CHALLENGER' }
+  | {
+      event: 'agent_text_delta'
+      agent: 'HOST' | 'ANALYST' | 'MARKETING' | 'FINANCE' | 'CHALLENGER'
+      delta: string
+    }
+  | {
+      event: 'agent_message_done'
+      agent: 'HOST' | 'ANALYST' | 'MARKETING' | 'FINANCE' | 'CHALLENGER'
+      state: 'idle' | 'thinking' | 'active'
+      phase?: string
+      detail?: string | null
+    }
+  | { event: 'sql_status'; stage: string; generated_sql?: string }
+  | { event: 'final_payload'; payload: QAResponse }
+  | { event: 'error'; message: string }
+
+type StreamCallbacks = {
+  onDelta?: (deltaText: string) => void
+  onAgentStatus?: (
+    agent: 'HOST' | 'ANALYST' | 'MARKETING' | 'FINANCE' | 'CHALLENGER',
+    state: 'thinking' | 'idle' | 'active',
+    meta?: { phase?: string; detail?: string | null },
+  ) => void
+  onAgentMessageStart?: (agent: 'HOST' | 'ANALYST' | 'MARKETING' | 'FINANCE' | 'CHALLENGER') => void
+  onAgentTextDelta?: (
+    agent: 'HOST' | 'ANALYST' | 'MARKETING' | 'FINANCE' | 'CHALLENGER',
+    delta: string,
+  ) => void
+  onAgentMessageDone?: (
+    agent: 'HOST' | 'ANALYST' | 'MARKETING' | 'FINANCE' | 'CHALLENGER',
+    meta?: { phase?: string; detail?: string | null; state?: 'idle' | 'thinking' | 'active' },
+  ) => void
+  onFinalPayload?: (payload: QAResponse) => void
+  onStreamError?: (message: string) => void
+}
+
 function apiBase(): string {
   const b = import.meta.env.VITE_PULSECAST_API_URL
   return (typeof b === 'string' && b.length > 0 ? b : 'http://localhost:8000').replace(/\/$/, '')
@@ -150,7 +189,7 @@ function parseSseEvents(chunk: string): string[] {
 
 export async function streamPulsecastQa(
   body: QARequestBody,
-  onDelta?: (deltaText: string) => void,
+  callbacks?: StreamCallbacks,
 ): Promise<QAResponse> {
   const req: OpenAIChatRequest = {
     model: 'pulsecast-qa',
@@ -201,8 +240,44 @@ export async function streamPulsecastQa(
       const chunk = JSON.parse(dataLine) as OpenAIChunk
       const delta = chunk.choices?.[0]?.delta?.content
       if (delta) {
-        assembled += delta
-        if (onDelta) onDelta(delta)
+        // Realtime typed event transport in delta.content
+        let handledAsEvent = false
+        try {
+          const evt = JSON.parse(delta) as StreamEventPayload
+          if (evt && typeof evt === 'object' && 'event' in evt) {
+            handledAsEvent = true
+            if (evt.event === 'agent_status') {
+              callbacks?.onAgentStatus?.(evt.agent, evt.state)
+            } else if (evt.event === 'agent_message_start') {
+              callbacks?.onAgentMessageStart?.(evt.agent)
+            } else if (evt.event === 'agent_text_delta') {
+              callbacks?.onAgentTextDelta?.(evt.agent, evt.delta)
+            } else if (evt.event === 'agent_message_done') {
+              callbacks?.onAgentStatus?.(evt.agent, evt.state, {
+                phase: evt.phase,
+                detail: evt.detail ?? null,
+              })
+              callbacks?.onAgentMessageDone?.(evt.agent, {
+                phase: evt.phase,
+                detail: evt.detail ?? null,
+                state: evt.state,
+              })
+            } else if (evt.event === 'sql_status') {
+              // no-op: hook can still infer progress from agent updates
+            } else if (evt.event === 'final_payload') {
+              callbacks?.onFinalPayload?.(evt.payload)
+              assembled = JSON.stringify(evt.payload)
+            } else if (evt.event === 'error') {
+              callbacks?.onStreamError?.(evt.message)
+            }
+          }
+        } catch {
+          handledAsEvent = false
+        }
+        if (!handledAsEvent) {
+          assembled += delta
+          callbacks?.onDelta?.(delta)
+        }
       }
     }
   }

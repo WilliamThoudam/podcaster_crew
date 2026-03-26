@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any
+import json
+from typing import Any, AsyncIterator
 
 import httpx
 
@@ -42,8 +43,66 @@ async def chat_complete_json(
     timeout = httpx.Timeout(timeout_seconds)
     async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.post(url, headers=headers, json=payload)
-        resp.raise_for_status()
+        if resp.status_code >= 400:
+            body_snippet = resp.text[:1000].replace("\n", " ")
+            raise httpx.HTTPStatusError(
+                f"OpenAI-compatible upstream HTTP {resp.status_code} at {url}. Body: {body_snippet}",
+                request=resp.request,
+                response=resp,
+            )
         return resp.json()
+
+
+async def chat_complete_stream_text(
+    *,
+    base_url: str,
+    api_key: str,
+    model: str,
+    messages: list[dict[str, str]],
+    temperature: float,
+    timeout_seconds: float,
+) -> AsyncIterator[str]:
+    """
+    True upstream token streaming from an OpenAI-compatible endpoint.
+    Yields assistant text deltas only.
+    """
+    url = _chat_completions_url(base_url)
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    payload: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "stream": True,
+    }
+    timeout = httpx.Timeout(timeout_seconds)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        async with client.stream("POST", url, headers=headers, json=payload) as resp:
+            if resp.status_code >= 400:
+                text = (await resp.aread()).decode("utf-8", errors="replace")
+                body_snippet = text[:1000].replace("\n", " ")
+                raise httpx.HTTPStatusError(
+                    f"OpenAI-compatible upstream HTTP {resp.status_code} at {url}. Body: {body_snippet}",
+                    request=resp.request,
+                    response=resp,
+                )
+
+            async for raw in resp.aiter_lines():
+                line = (raw or "").strip()
+                if not line or not line.startswith("data:"):
+                    continue
+                data = line[len("data:") :].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    obj = json.loads(data)
+                    delta = (((obj.get("choices") or [{}])[0].get("delta") or {}).get("content"))
+                    if isinstance(delta, str) and delta:
+                        yield delta
+                except json.JSONDecodeError:
+                    continue
 
 
 def extract_assistant_text(body: dict[str, Any]) -> str:

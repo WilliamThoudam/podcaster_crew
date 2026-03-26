@@ -8,12 +8,13 @@ import httpx
 from fastapi import HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.clients.openai_chat import chat_complete_json, extract_assistant_text
+from app.clients.openai_chat import chat_complete_stream_text
 from app.config import Settings
 from app.models.schemas import AgentInsight, AgentPipelineStep, ExecuteSqlResponse
 
 PulsecastRole = Literal["HOST", "ANALYST", "MARKETING", "FINANCE", "CHALLENGER"]
 PulsecastAgentId = Literal["host", "analyst", "marketing", "finance", "challenger"]
+PulsecastEvent = dict[str, Any]
 
 
 class _AgentOut(BaseModel):
@@ -111,6 +112,7 @@ async def run_llm_agents(
     generated_sql: str,
     exe: ExecuteSqlResponse,
     deterministic_summary: str,
+    on_event: Any | None = None,
 ) -> tuple[str, list[AgentPipelineStep], list[AgentInsight]]:
     """
     Run 5 sequential OpenAI-compatible LLM calls (mandatory), returning:
@@ -131,8 +133,12 @@ async def run_llm_agents(
     messages: list[AgentInsight] = []
 
     for role in roles:
+        if on_event:
+            await on_event({"event": "agent_status", "agent": role, "state": "thinking"})
+            await on_event({"event": "agent_message_start", "agent": role})
         try:
-            body = await chat_complete_json(
+            text_parts: list[str] = []
+            async for delta in chat_complete_stream_text(
                 base_url=settings.openai_base_url,
                 api_key=settings.openai_api_key,
                 model=settings.openai_model,
@@ -142,8 +148,13 @@ async def run_llm_agents(
                     {"role": "system", "content": _system_prompt(role)},
                     {"role": "user", "content": _human_prompt(ctx=ctx, prior=prior)},
                 ],
-            )
-            text = extract_assistant_text(body)
+            ):
+                text_parts.append(delta)
+                if on_event:
+                    await on_event({"event": "agent_text_delta", "agent": role, "delta": delta})
+            text = "".join(text_parts).strip()
+            if not text:
+                raise ValueError(f"Empty streamed content from agent {role}")
             out = _parse_agent_json(text)
         except (httpx.HTTPError, ValueError, json.JSONDecodeError) as e:
             raise HTTPException(
@@ -161,6 +172,16 @@ async def run_llm_agents(
             )
         )
         messages.append(AgentInsight(role=role, text=out.text))
+        if on_event:
+            await on_event(
+                {
+                    "event": "agent_message_done",
+                    "agent": role,
+                    "state": "idle",
+                    "phase": out.phase,
+                    "detail": out.detail,
+                }
+            )
 
     analyst_answer = prior["ANALYST"].text if "ANALYST" in prior else messages[1].text
     return analyst_answer, pipeline, messages

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import uuid
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 import httpx
 from fastapi import HTTPException, status
@@ -54,10 +55,38 @@ def _payload_json_string(*, answer: str, generated_sql: str, execute_payload: di
     )
 
 
+def _chunk_json(
+    *,
+    completion_id: str,
+    model: str,
+    now: int,
+    content: str | None = None,
+    role: str | None = None,
+    finish_reason: str | None = None,
+) -> str:
+    chunk = OpenAIChatCompletionChunk(
+        id=completion_id,
+        created=now,
+        model=model,
+        choices=[
+            OpenAIChatCompletionChunkChoice(
+                index=0,
+                delta=OpenAIChatCompletionDelta(
+                    role="assistant" if role == "assistant" else None,
+                    content=content,
+                ),
+                finish_reason=finish_reason,
+            )
+        ],
+    )
+    return chunk.model_dump_json()
+
+
 async def build_completion_payload(
     *,
     settings: Settings,
     req: OpenAIChatCompletionRequest,
+    on_event: Any | None = None,
 ) -> tuple[str, str]:
     question = _extract_last_user_question(req)
     user_id = settings.default_user_id
@@ -69,6 +98,8 @@ async def build_completion_payload(
 
     tts: TextToSqlResponse
     try:
+        if on_event:
+            await on_event({"event": "sql_status", "stage": "text_to_sql_start"})
         tts = await generate_sql(
             settings=settings,
             question=question,
@@ -82,6 +113,8 @@ async def build_completion_payload(
             max_nodes=max_nodes,
             is_retry=False,
         )
+        if on_event:
+            await on_event({"event": "sql_status", "stage": "text_to_sql_done"})
     except httpx.HTTPError as e:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -95,8 +128,12 @@ async def build_completion_payload(
         )
 
     sql = validate_and_normalize_sql((tts.generated_sql or "").strip())
+    if on_event:
+        await on_event({"event": "sql_status", "stage": "sql_validated", "generated_sql": sql})
 
     try:
+        if on_event:
+            await on_event({"event": "sql_status", "stage": "execute_sql_start"})
         exe = await execute_sql_client(
             settings=settings,
             sql=sql,
@@ -104,6 +141,8 @@ async def build_completion_payload(
             user_db_id=user_db_id,
             db_type=db_type,
         )
+        if on_event:
+            await on_event({"event": "sql_status", "stage": "execute_sql_done"})
     except httpx.HTTPError as e:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -123,6 +162,7 @@ async def build_completion_payload(
         generated_sql=sql,
         exe=exe,
         deterministic_summary=deterministic,
+        on_event=on_event,
     )
 
     content = _payload_json_string(
@@ -163,52 +203,38 @@ async def stream_completion_sse(
     settings: Settings,
     req: OpenAIChatCompletionRequest,
 ) -> AsyncIterator[str]:
-    _answer, content = await build_completion_payload(settings=settings, req=req)
     now = int(time.time())
     completion_id = f"chatcmpl_{uuid.uuid4().hex}"
+    yield f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=now, role='assistant')}\n\n"
 
-    role_chunk = OpenAIChatCompletionChunk(
-        id=completion_id,
-        created=now,
-        model=req.model,
-        choices=[
-            OpenAIChatCompletionChunkChoice(
-                index=0,
-                delta=OpenAIChatCompletionDelta(role="assistant"),
-                finish_reason=None,
+    queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    sentinel = {"event": "__end__"}
+
+    async def _emit_event(evt: dict[str, Any]) -> None:
+        await queue.put(evt)
+
+    async def _produce() -> None:
+        try:
+            _answer, content = await build_completion_payload(settings=settings, req=req, on_event=_emit_event)
+            await queue.put({"event": "final_payload", "payload": json.loads(content)})
+        except Exception as e:
+            await queue.put({"event": "error", "message": str(e)})
+        finally:
+            await queue.put(sentinel)
+
+    producer = asyncio.create_task(_produce())
+    try:
+        while True:
+            evt = await queue.get()
+            if evt is sentinel or evt.get("event") == "__end__":
+                break
+            payload = json.dumps(evt, ensure_ascii=False)
+            yield (
+                f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), content=payload)}\n\n"
             )
-        ],
-    )
-    yield f"data: {role_chunk.model_dump_json()}\n\n"
+    finally:
+        if not producer.done():
+            producer.cancel()
 
-    step = 256
-    for i in range(0, len(content), step):
-        part = content[i : i + step]
-        c = OpenAIChatCompletionChunk(
-            id=completion_id,
-            created=now,
-            model=req.model,
-            choices=[
-                OpenAIChatCompletionChunkChoice(
-                    index=0,
-                    delta=OpenAIChatCompletionDelta(content=part),
-                    finish_reason=None,
-                )
-            ],
-        )
-        yield f"data: {c.model_dump_json()}\n\n"
-
-    done_chunk = OpenAIChatCompletionChunk(
-        id=completion_id,
-        created=now,
-        model=req.model,
-        choices=[
-            OpenAIChatCompletionChunkChoice(
-                index=0,
-                delta=OpenAIChatCompletionDelta(),
-                finish_reason="stop",
-            )
-        ],
-    )
-    yield f"data: {done_chunk.model_dump_json()}\n\n"
+    yield f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), finish_reason='stop')}\n\n"
     yield "data: [DONE]\n\n"

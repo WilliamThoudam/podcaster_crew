@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 
 from app.config import Settings, get_settings
@@ -10,7 +10,7 @@ from app.models.schemas import (
     OpenAIModelsListResponse,
     OpenAIModelCard,
 )
-from app.services.chat_completions import create_non_stream_response, stream_completion_sse
+from app.services.chat_completions import stream_completion_sse
 
 router = APIRouter(tags=["openai-compatible"])
 
@@ -29,10 +29,13 @@ async def chat_completions(
     body: OpenAIChatCompletionRequest,
     settings: Settings = Depends(get_settings),
 ):
-    if body.stream:
-        return StreamingResponse(
-            stream_completion_sse(settings=settings, req=body),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+    if not body.stream:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="stream must be true for this service",
         )
-    return await create_non_stream_response(settings=settings, req=body)
+    return StreamingResponse(
+        stream_completion_sse(settings=settings, req=body),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+    )

@@ -452,16 +452,6 @@ export function Pulsecast() {
                 <div className="qa-messages">
                   {app.qaMessages.map((m) => (
                     <div key={m.id} className="chat-bubble">
-                      <div
-                        className="bubble-avatar"
-                        style={{
-                          color: m.color,
-                          borderColor: m.color,
-                          background: 'rgba(0,0,0,0.3)',
-                        }}
-                      >
-                        {m.emoji}
-                      </div>
                       <div className="bubble-body">
                         <div className="bubble-meta">
                           <span className="bubble-name" style={{ color: m.color }}>

@@ -4,7 +4,7 @@ import asyncio
 import json
 import time
 import uuid
-from typing import Any, AsyncIterator
+from typing import AsyncIterator
 
 import httpx
 from fastapi import HTTPException, status
@@ -86,7 +86,6 @@ async def build_completion_payload(
     *,
     settings: Settings,
     req: OpenAIChatCompletionRequest,
-    on_event: Any | None = None,
 ) -> tuple[str, str]:
     question = _extract_last_user_question(req)
     user_id = settings.default_user_id
@@ -98,8 +97,6 @@ async def build_completion_payload(
 
     tts: TextToSqlResponse
     try:
-        if on_event:
-            await on_event({"event": "sql_status", "stage": "text_to_sql_start"})
         tts = await generate_sql(
             settings=settings,
             question=question,
@@ -113,8 +110,6 @@ async def build_completion_payload(
             max_nodes=max_nodes,
             is_retry=False,
         )
-        if on_event:
-            await on_event({"event": "sql_status", "stage": "text_to_sql_done"})
     except httpx.HTTPError as e:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -128,12 +123,7 @@ async def build_completion_payload(
         )
 
     sql = validate_and_normalize_sql((tts.generated_sql or "").strip())
-    if on_event:
-        await on_event({"event": "sql_status", "stage": "sql_validated", "generated_sql": sql})
-
     try:
-        if on_event:
-            await on_event({"event": "sql_status", "stage": "execute_sql_start"})
         exe = await execute_sql_client(
             settings=settings,
             sql=sql,
@@ -141,8 +131,6 @@ async def build_completion_payload(
             user_db_id=user_db_id,
             db_type=db_type,
         )
-        if on_event:
-            await on_event({"event": "sql_status", "stage": "execute_sql_done"})
     except httpx.HTTPError as e:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -162,7 +150,6 @@ async def build_completion_payload(
         generated_sql=sql,
         exe=exe,
         deterministic_summary=deterministic,
-        on_event=on_event,
     )
 
     content = _payload_json_string(
@@ -203,38 +190,17 @@ async def stream_completion_sse(
     settings: Settings,
     req: OpenAIChatCompletionRequest,
 ) -> AsyncIterator[str]:
+    _answer, content = await build_completion_payload(settings=settings, req=req)
     now = int(time.time())
     completion_id = f"chatcmpl_{uuid.uuid4().hex}"
     yield f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=now, role='assistant')}\n\n"
-
-    queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
-    sentinel = {"event": "__end__"}
-
-    async def _emit_event(evt: dict[str, Any]) -> None:
-        await queue.put(evt)
-
-    async def _produce() -> None:
-        try:
-            _answer, content = await build_completion_payload(settings=settings, req=req, on_event=_emit_event)
-            await queue.put({"event": "final_payload", "payload": json.loads(content)})
-        except Exception as e:
-            await queue.put({"event": "error", "message": str(e)})
-        finally:
-            await queue.put(sentinel)
-
-    producer = asyncio.create_task(_produce())
-    try:
-        while True:
-            evt = await queue.get()
-            if evt is sentinel or evt.get("event") == "__end__":
-                break
-            payload = json.dumps(evt, ensure_ascii=False)
-            yield (
-                f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), content=payload)}\n\n"
-            )
-    finally:
-        if not producer.done():
-            producer.cancel()
+    # Use tiny chunks + tiny pacing so clients render gradual typing
+    # instead of receiving one large buffered payload.
+    step = 12
+    for i in range(0, len(content), step):
+        part = content[i : i + step]
+        yield f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), content=part)}\n\n"
+        await asyncio.sleep(0.015)
 
     yield f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), finish_reason='stop')}\n\n"
     yield "data: [DONE]\n\n"

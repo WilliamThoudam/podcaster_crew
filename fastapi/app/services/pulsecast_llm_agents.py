@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Literal
+from typing import Literal
 
 import httpx
 from fastapi import HTTPException, status
@@ -14,7 +14,6 @@ from app.models.schemas import AgentInsight, AgentPipelineStep, ExecuteSqlRespon
 
 PulsecastRole = Literal["HOST", "ANALYST", "MARKETING", "FINANCE", "CHALLENGER"]
 PulsecastAgentId = Literal["host", "analyst", "marketing", "finance", "challenger"]
-PulsecastEvent = dict[str, Any]
 
 
 class _AgentOut(BaseModel):
@@ -112,7 +111,6 @@ async def run_llm_agents(
     generated_sql: str,
     exe: ExecuteSqlResponse,
     deterministic_summary: str,
-    on_event: Any | None = None,
 ) -> tuple[str, list[AgentPipelineStep], list[AgentInsight]]:
     """
     Run 5 sequential OpenAI-compatible LLM calls (mandatory), returning:
@@ -133,9 +131,6 @@ async def run_llm_agents(
     messages: list[AgentInsight] = []
 
     for role in roles:
-        if on_event:
-            await on_event({"event": "agent_status", "agent": role, "state": "thinking"})
-            await on_event({"event": "agent_message_start", "agent": role})
         try:
             text_parts: list[str] = []
             async for delta in chat_complete_stream_text(
@@ -150,8 +145,6 @@ async def run_llm_agents(
                 ],
             ):
                 text_parts.append(delta)
-                if on_event:
-                    await on_event({"event": "agent_text_delta", "agent": role, "delta": delta})
             text = "".join(text_parts).strip()
             if not text:
                 raise ValueError(f"Empty streamed content from agent {role}")
@@ -172,16 +165,6 @@ async def run_llm_agents(
             )
         )
         messages.append(AgentInsight(role=role, text=out.text))
-        if on_event:
-            await on_event(
-                {
-                    "event": "agent_message_done",
-                    "agent": role,
-                    "state": "idle",
-                    "phase": out.phase,
-                    "detail": out.detail,
-                }
-            )
 
     analyst_answer = prior["ANALYST"].text if "ANALYST" in prior else messages[1].text
     return analyst_answer, pipeline, messages

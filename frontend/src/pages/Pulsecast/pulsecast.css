@@ -720,6 +720,32 @@ body::before {
   gap: 16px;
 }
 
+/* Keep interaction chat plain/minimal (no avatar bubble look). */
+#screen-interaction .chat-bubble {
+  gap: 0;
+  max-width: 100%;
+}
+
+#screen-interaction .bubble-meta {
+  margin-bottom: 4px;
+}
+
+#screen-interaction .bubble-name {
+  font-size: 13px;
+}
+
+#screen-interaction .bubble-text {
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  padding: 0;
+}
+
+#screen-interaction .bubble-text.user-bubble {
+  background: transparent;
+  border: none;
+}
+
 .qa-input-bar {
   padding: 16px 24px;
   background: var(--surface);

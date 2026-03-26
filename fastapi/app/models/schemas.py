@@ -10,6 +10,28 @@ class ChatMessage(BaseModel):
     content: str
 
 
+class OpenAIChatMessage(BaseModel):
+    role: Literal["system", "user", "assistant"]
+    content: str
+
+
+class OpenAIResponseFormat(BaseModel):
+    type: Literal["json_object", "text"] = "text"
+
+
+class OpenAIChatCompletionRequest(BaseModel):
+    model: str = "pulsecast-qa"
+    messages: list[OpenAIChatMessage] = Field(default_factory=list, min_length=1)
+    stream: bool = False
+    temperature: float | None = None
+    response_format: OpenAIResponseFormat | None = None
+
+    # Optional compatibility fields (accepted, currently not used)
+    max_tokens: int | None = None
+    n: int | None = None
+    user: str | None = None
+
+
 class QARequest(BaseModel):
     question: str = Field(..., min_length=1, description="Natural language question")
     user_id: int | None = None
@@ -82,3 +104,66 @@ class QAResponse(BaseModel):
         default_factory=list,
         description="Multi-agent narration; Analyst entry mirrors `answer` for SQL-led turns.",
     )
+
+
+class OpenAIChatCompletionChoice(BaseModel):
+    index: int = 0
+    message: OpenAIChatMessage
+    finish_reason: str | None = "stop"
+
+
+class OpenAIUsage(BaseModel):
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+
+
+class OpenAIChatCompletionResponse(BaseModel):
+    id: str
+    object: Literal["chat.completion"] = "chat.completion"
+    created: int
+    model: str
+    choices: list[OpenAIChatCompletionChoice]
+    usage: OpenAIUsage = Field(default_factory=OpenAIUsage)
+
+
+class OpenAIChatCompletionDelta(BaseModel):
+    role: Literal["assistant"] | None = None
+    content: str | None = None
+
+
+class OpenAIChatCompletionChunkChoice(BaseModel):
+    index: int = 0
+    delta: OpenAIChatCompletionDelta
+    finish_reason: str | None = None
+
+
+class OpenAIChatCompletionChunk(BaseModel):
+    id: str
+    object: Literal["chat.completion.chunk"] = "chat.completion.chunk"
+    created: int
+    model: str
+    choices: list[OpenAIChatCompletionChunkChoice]
+
+
+class OpenAIModelCard(BaseModel):
+    id: str
+    object: Literal["model"] = "model"
+    created: int = 0
+    owned_by: str = "pulsecast"
+
+
+class OpenAIModelsListResponse(BaseModel):
+    object: Literal["list"] = "list"
+    data: list[OpenAIModelCard]
+
+
+class OpenAIError(BaseModel):
+    message: str
+    type: str = "invalid_request_error"
+    param: str | None = None
+    code: str | None = None
+
+
+class OpenAIErrorResponse(BaseModel):
+    error: OpenAIError

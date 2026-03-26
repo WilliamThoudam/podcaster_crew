@@ -10,7 +10,7 @@ from app.clients.execute_sql import execute_sql as execute_sql_client
 from app.clients.text_to_sql import generate_sql
 from app.config import Settings
 from app.models.schemas import ExecuteSqlResponse, QARequest, QAResponse, TextToSqlResponse
-from app.services.pulsecast_agents import build_pulsecast_payload
+from app.services.pulsecast_llm_agents import run_llm_agents
 
 _FORBIDDEN = re.compile(
     r"\b(INSERT|UPDATE|DELETE|MERGE|TRUNCATE|ALTER|DROP|CREATE|GRANT|REVOKE|CALL|EXECUTE)\b",
@@ -136,12 +136,13 @@ async def run_qa(settings: Settings, req: QARequest) -> QAResponse:
             detail={"generated_sql": sql, "execute": exe.model_dump()},
         )
 
-    answer = build_answer_summary(exe)
-    pipeline, agent_messages = build_pulsecast_payload(
+    deterministic = build_answer_summary(exe)
+    answer, pipeline, agent_messages = await run_llm_agents(
+        settings=settings,
         question=req.question.strip(),
-        sql=sql,
+        generated_sql=sql,
         exe=exe,
-        analyst_summary=answer,
+        deterministic_summary=deterministic,
     )
     return QAResponse(
         generated_sql=sql,

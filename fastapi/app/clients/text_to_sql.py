@@ -10,6 +10,7 @@ async def generate_sql(
     *,
     settings: Settings,
     question: str,
+    messages: list[dict[str, str]] | None = None,
     user_id: int,
     user_db_id: int,
     db_type: str,
@@ -21,7 +22,7 @@ async def generate_sql(
 ) -> TextToSqlResponse:
     url = settings.text_to_sql_base_url.rstrip("/") + "/v1/chat/completions"
     payload: dict = {
-        "messages": [{"role": "user", "content": question}],
+        "messages": messages or [{"role": "user", "content": question}],
         "max_nodes": max_nodes,
         "stream": False,
         "user_db_id": user_db_id,

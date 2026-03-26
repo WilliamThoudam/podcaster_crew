@@ -8,7 +8,7 @@ import {
   TOPBAR_BY_SCREEN,
   TOTAL_MS,
 } from '../constants'
-import { postPulsecastQa } from '../../../services/api/pulsecastQa'
+import { streamPulsecastQa } from '../../../services/api/pulsecastQa'
 import { colorToRgb, cumulativeMsBeforeSegment, fmt, segmentIndexAtElapsed } from '../utils'
 import { pathForScreen } from '../../../routes/paths'
 import type { AgentState, PodcastRole, QaMessage, Screen } from '../../../types'
@@ -253,12 +253,29 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
             : `sess-${Date.now()}`
       }
       setAgentStates(AGENTS.map((_, i) => (i === 1 ? 'thinking' : 'idle')))
-      setSqlLog('// Generating SQL query…')
+      setSqlLog('// Streaming OpenAI completion…')
       try {
-        const result = await postPulsecastQa({
-          question: q,
-          session_id: qaSessionRef.current,
-        })
+        let streamedChars = 0
+        const conversation = [
+          ...qaMessages
+            .filter((m) => m.kind === 'user' && m.role === 'YOU' && typeof m.text === 'string')
+            .map((m) => ({ role: 'user' as const, content: m.text })),
+          { role: 'user' as const, content: q },
+        ]
+        const result = await streamPulsecastQa(
+          {
+            question: q,
+            session_id: qaSessionRef.current,
+            messages: conversation,
+          },
+          (delta) => {
+            streamedChars += delta.length
+            if (streamedChars % 256 < delta.length) {
+              setSqlLog(`// Streaming OpenAI completion… ${streamedChars} chars`)
+            }
+          },
+        )
+        setSqlLog('// Generating SQL query…')
         const ran = result.execute.query ?? result.generated_sql
         setSqlLog(ran)
         setAgentStates(AGENTS.map(() => 'idle'))
@@ -292,7 +309,7 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
         ])
       }
     },
-    [qaInput, showToast],
+    [qaInput, qaMessages, showToast],
   )
 
   const submitInterrupt = useCallback(() => {

@@ -43,14 +43,50 @@ export type QAResponse = {
 
 export type QARequestBody = {
   question: string
-  user_id?: number
-  user_db_id?: number
-  db_type?: string
-  schema_name?: string
   session_id?: string
-  model?: string
-  max_nodes?: string
-  is_retry?: boolean
+  messages?: Array<{ role: 'user'; content: string }>
+}
+
+type OpenAIMessage = {
+  role: 'user' | 'assistant' | 'system'
+  content: string
+}
+
+type OpenAIChatRequest = {
+  model: string
+  messages: OpenAIMessage[]
+  stream: boolean
+  temperature?: number
+  response_format?: { type: 'json_object' | 'text' }
+  user?: string
+}
+
+type OpenAIChoice = {
+  index: number
+  message: OpenAIMessage
+  finish_reason?: string | null
+}
+
+type OpenAIChatResponse = {
+  id: string
+  object: 'chat.completion'
+  created: number
+  model: string
+  choices: OpenAIChoice[]
+}
+
+type OpenAIChunkChoice = {
+  index: number
+  delta?: { role?: 'assistant'; content?: string }
+  finish_reason?: string | null
+}
+
+type OpenAIChunk = {
+  id: string
+  object: 'chat.completion.chunk'
+  created: number
+  model: string
+  choices: OpenAIChunkChoice[]
 }
 
 function apiBase(): string {
@@ -69,40 +105,110 @@ function parseDetail(detail: unknown): string {
 }
 
 export async function postPulsecastQa(body: QARequestBody): Promise<QAResponse> {
-  const optional: QARequestBody = { ...body }
-  const uid = import.meta.env.VITE_PULSECAST_USER_ID
-  const udb = import.meta.env.VITE_PULSECAST_USER_DB_ID
-  if (optional.user_id === undefined && uid !== undefined && uid !== '') {
-    optional.user_id = Number(uid)
+  const req: OpenAIChatRequest = {
+    model: 'pulsecast-qa',
+    stream: false,
+    messages:
+      body.messages && body.messages.length > 0
+        ? body.messages
+        : [{ role: 'user', content: body.question }],
+    response_format: { type: 'json_object' },
+    user: body.session_id,
   }
-  if (optional.user_db_id === undefined && udb !== undefined && udb !== '') {
-    optional.user_db_id = Number(udb)
-  }
-  const dbType = import.meta.env.VITE_PULSECAST_DB_TYPE
-  if (optional.db_type === undefined && typeof dbType === 'string' && dbType) {
-    optional.db_type = dbType
-  }
-  const schema = import.meta.env.VITE_PULSECAST_SCHEMA_NAME
-  if (optional.schema_name === undefined && typeof schema === 'string' && schema) {
-    optional.schema_name = schema
-  }
-
-  const res = await fetch(`${apiBase()}/api/v1/qa`, {
+  const res = await fetch(`${apiBase()}/v1/chat/completions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(optional),
+    body: JSON.stringify(req),
   })
 
   if (!res.ok) {
     let msg = res.statusText
     try {
-      const j = (await res.json()) as { detail?: unknown }
-      if (j.detail !== undefined) msg = parseDetail(j.detail)
+      const j = (await res.json()) as { error?: { message?: unknown }; detail?: unknown }
+      if (j.error?.message !== undefined) msg = parseDetail(j.error.message)
+      else if (j.detail !== undefined) msg = parseDetail(j.detail)
     } catch {
       /* ignore */
     }
     throw new Error(msg)
   }
 
-  return res.json() as Promise<QAResponse>
+  const completion = (await res.json()) as OpenAIChatResponse
+  const content = completion.choices?.[0]?.message?.content
+  if (!content) throw new Error('Missing assistant content in completion response')
+  return JSON.parse(content) as QAResponse
+}
+
+function parseSseEvents(chunk: string): string[] {
+  return chunk
+    .split('\n\n')
+    .map((block) => block.trim())
+    .filter(Boolean)
+    .filter((block) => block.startsWith('data:'))
+    .map((block) => block.slice('data:'.length).trim())
+}
+
+export async function streamPulsecastQa(
+  body: QARequestBody,
+  onDelta?: (deltaText: string) => void,
+): Promise<QAResponse> {
+  const req: OpenAIChatRequest = {
+    model: 'pulsecast-qa',
+    stream: true,
+    messages:
+      body.messages && body.messages.length > 0
+        ? body.messages
+        : [{ role: 'user', content: body.question }],
+    response_format: { type: 'json_object' },
+    user: body.session_id,
+  }
+  const res = await fetch(`${apiBase()}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+  })
+  if (!res.ok) {
+    let msg = res.statusText
+    try {
+      const j = (await res.json()) as { error?: { message?: unknown }; detail?: unknown }
+      if (j.error?.message !== undefined) msg = parseDetail(j.error.message)
+      else if (j.detail !== undefined) msg = parseDetail(j.detail)
+    } catch {
+      /* ignore */
+    }
+    throw new Error(msg)
+  }
+  if (!res.body) throw new Error('Streaming response body is unavailable')
+
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let rawBuffer = ''
+  let assembled = ''
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    rawBuffer += decoder.decode(value, { stream: true })
+
+    const boundary = rawBuffer.lastIndexOf('\n\n')
+    if (boundary === -1) continue
+
+    const ready = rawBuffer.slice(0, boundary + 2)
+    rawBuffer = rawBuffer.slice(boundary + 2)
+
+    for (const dataLine of parseSseEvents(ready)) {
+      if (dataLine === '[DONE]') continue
+      const chunk = JSON.parse(dataLine) as OpenAIChunk
+      const delta = chunk.choices?.[0]?.delta?.content
+      if (delta) {
+        assembled += delta
+        if (onDelta) onDelta(delta)
+      }
+    }
+  }
+
+  if (!assembled.trim()) {
+    throw new Error('No assistant content received from stream')
+  }
+  return JSON.parse(assembled) as QAResponse
 }

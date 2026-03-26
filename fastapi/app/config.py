@@ -15,6 +15,13 @@ class Settings(BaseSettings):
 
     http_timeout_seconds: float = 120.0
 
+    # Mandatory OpenAI-compatible LLM (used for Pulsecast multi-agent reasoning)
+    openai_base_url: str
+    openai_api_key: str
+    openai_model: str
+    openai_temperature: float = 0.4
+    openai_timeout_seconds: float = 60.0
+
     # Defaults for missing request fields (override per environment)
     default_user_id: int = 41
     default_user_db_id: int = 1

@@ -214,6 +214,19 @@ async def build_completion_payload(
                     "sub_question": sub_q,
                 },
             )
+            # Stream the "Text-to-SQL N/total: <sub_question>" label chunk by chunk
+            await _emit_text_chunks(
+                on_progress=on_progress,
+                base_event={
+                    "index": idx + 1,
+                    "total": len(analyst_plan.sub_questions),
+                    "sub_question": sub_q,
+                },
+                text=f"Text-to-SQL {idx + 1}/{len(analyst_plan.sub_questions)}: {sub_q}",
+                chunk_size=2,
+                event_type="tts_label_chunk",
+                delay_s=0.04,
+            )
             tts = await generate_sql(
                 settings=settings,
                 question=sub_q,
@@ -260,7 +273,7 @@ async def build_completion_payload(
                 "sub_question": sub_q,
             },
             text=sql,
-            chunk_size=2,
+            chunk_size=10,
             event_type="tts_sql_chunk",
             delay_s=0.05,
         )
@@ -326,6 +339,7 @@ async def build_completion_payload(
                     "sub_question": sub_q,
                 },
             )
+            # Stream the "Result N/total: <sub_question>" label chunk by chunk
             await _emit_text_chunks(
                 on_progress=on_progress,
                 base_event={
@@ -333,7 +347,19 @@ async def build_completion_payload(
                     "total": len(analyst_plan.sub_questions),
                     "sub_question": sub_q,
                 },
-                text="_Executing…_",
+                text=f"Result {idx + 1}/{len(analyst_plan.sub_questions)}: {sub_q}",
+                chunk_size=2,
+                event_type="execute_label_chunk",
+                delay_s=0.04,
+            )
+            await _emit_text_chunks(
+                on_progress=on_progress,
+                base_event={
+                    "index": idx + 1,
+                    "total": len(analyst_plan.sub_questions),
+                    "sub_question": sub_q,
+                },
+                text="Executing…",
                 chunk_size=2,
                 event_type="execute_status_chunk",
                 delay_s=0.06,
@@ -381,9 +407,9 @@ async def build_completion_payload(
                 "sub_question": sub_q,
             },
             text=table_md,
-            chunk_size=2,
+            chunk_size=10,
             event_type="execute_table_chunk",
-            delay_s=0.03,
+            delay_s=0.05,
         )
         await _emit_progress(
             on_progress,
@@ -427,29 +453,6 @@ async def build_completion_payload(
     )
     # Stream contract is markdown-first: assistant content should be plain markdown text.
     return answer, answer
-
-
-async def create_non_stream_response(
-    *,
-    settings: Settings,
-    req: OpenAIChatCompletionRequest,
-) -> OpenAIChatCompletionResponse:
-    _answer, content = await build_completion_payload(settings=settings, req=req)
-    now = int(time.time())
-    completion_id = f"chatcmpl_{uuid.uuid4().hex}"
-    return OpenAIChatCompletionResponse(
-        id=completion_id,
-        created=now,
-        model=req.model,
-        choices=[
-            OpenAIChatCompletionChoice(
-                index=0,
-                message=OpenAIChatMessage(role="assistant", content=content),
-                finish_reason="stop",
-            )
-        ],
-        usage=OpenAIUsage(),
-    )
 
 
 async def stream_completion_sse(

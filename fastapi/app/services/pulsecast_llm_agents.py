@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Literal
+from typing import Any, Literal
 
 import httpx
 from fastapi import HTTPException, status
@@ -10,7 +10,14 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.clients.openai_chat import chat_complete_stream_text
 from app.config import Settings
-from app.models.schemas import AgentInsight, AgentPipelineStep, ExecuteSqlResponse
+from app.models.schemas import (
+    AgentInsight,
+    AgentPipelineStep,
+    ExecuteSqlResponse,
+    PlanningAnalystOutput,
+    PlanningHostOutput,
+    SubResult,
+)
 
 PulsecastRole = Literal["HOST", "ANALYST", "MARKETING", "FINANCE", "CHALLENGER"]
 PulsecastAgentId = Literal["host", "analyst", "marketing", "finance", "challenger"]
@@ -49,14 +56,36 @@ def _safe_sample(exe: ExecuteSqlResponse, max_rows: int = 10, max_cell_len: int 
     return out
 
 
-def _context_blob(
+def _compact_sub_results(
+    sub_results: list[SubResult],
+    max_rows_per_result: int = 3,
+) -> list[dict[str, Any]]:
+    compact: list[dict[str, Any]] = []
+    for sr in sub_results:
+        compact.append(
+            {
+                "sub_question": sr.sub_question,
+                "generated_sql": sr.generated_sql,
+                "rowCount": sr.execute.rowCount,
+                "limited": sr.execute.limited,
+                "note": sr.execute.note,
+                "sample_rows": _safe_sample(sr.execute, max_rows=max_rows_per_result),
+            }
+        )
+    return compact
+
+
+def _context_blob_compact(
     *,
     question: str,
     generated_sql: str,
     exe: ExecuteSqlResponse,
     deterministic_summary: str,
+    sub_results: list[SubResult] | None = None,
+    host_plan: PlanningHostOutput | None = None,
+    analyst_plan: PlanningAnalystOutput | None = None,
 ) -> dict[str, Any]:
-    return {
+    base: dict[str, Any] = {
         "question": question,
         "generated_sql": generated_sql,
         "executed_query": exe.query,
@@ -68,23 +97,55 @@ def _context_blob(
         "sample_rows": _safe_sample(exe),
         "deterministic_summary": deterministic_summary,
     }
+    if sub_results:
+        base["sub_results"] = _compact_sub_results(sub_results)
+    if host_plan:
+        base["host_plan"] = {
+            "primary_focus": host_plan.primary_focus,
+            "time_window": host_plan.time_window,
+            "region_focus": host_plan.region_focus,
+            "metrics": host_plan.metrics,
+            "notes": host_plan.notes,
+        }
+    if analyst_plan:
+        base["analyst_plan"] = {
+            "sub_questions": analyst_plan.sub_questions,
+            "rationale": analyst_plan.rationale,
+        }
+    return base
 
 
-def _system_prompt(role: PulsecastRole) -> str:
+def _system_prompt_internal(role: PulsecastRole) -> str:
     return (
-        "You are a Pulsecast agent in a multi-agent analytics panel.\n"
+        "You are a Pulsecast internal enrichment agent.\n"
         f"Your role is: {role}\n\n"
         "You MUST return ONLY valid JSON (no markdown, no backticks, no extra text).\n"
         "Schema:\n"
         '{ "text": string, "phase": string, "detail": string|null }\n\n'
         "Rules:\n"
         "- Base your response strictly on the provided context (SQL + execution results).\n"
+        "- Your output is internal notes for the Host composer, not a user-facing response.\n"
         "- If data is insufficient, say what is missing and suggest the smallest next query refinement.\n"
         "- Keep it short and actionable (2-5 sentences).\n"
     )
 
 
-def _human_prompt(*, ctx: dict[str, Any], prior: dict[PulsecastRole, _AgentOut]) -> str:
+def _system_prompt_host_composer() -> str:
+    return (
+        "You are the HOST composer in Pulsecast.\n"
+        "You synthesize one final user-facing answer from SQL evidence and internal agent notes.\n\n"
+        "You MUST return ONLY valid JSON (no markdown, no backticks, no extra text).\n"
+        "Schema:\n"
+        '{ "text": string, "phase": string, "detail": string|null }\n\n'
+        "Rules:\n"
+        "- Write one clean final answer for the user.\n"
+        "- Do not output internal debate or role-play dialogue.\n"
+        "- If evidence is limited, clearly state the constraint and smallest next data step.\n"
+        "- Keep the answer concise and decision-oriented.\n"
+    )
+
+
+def _human_prompt(*, ctx: dict[str, Any], prior: dict[str, _AgentOut]) -> str:
     prior_obj = {k: v.model_dump() for k, v in prior.items()}
     return (
         "Context JSON:\n"
@@ -104,6 +165,39 @@ def _agent_id(role: PulsecastRole) -> PulsecastAgentId:
     }[role]
 
 
+async def _run_role_call(
+    *,
+    settings: Settings,
+    role: PulsecastRole,
+    system_prompt: str,
+    ctx: dict[str, Any],
+    prior: dict[str, _AgentOut],
+) -> _AgentOut:
+    try:
+        text_parts: list[str] = []
+        async for delta in chat_complete_stream_text(
+            base_url=settings.openai_base_url,
+            api_key=settings.openai_api_key,
+            model=settings.openai_model,
+            temperature=settings.openai_temperature,
+            timeout_seconds=settings.openai_timeout_seconds,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": _human_prompt(ctx=ctx, prior=prior)},
+            ],
+        ):
+            text_parts.append(delta)
+        text = "".join(text_parts).strip()
+        if not text:
+            raise ValueError(f"Empty streamed content from agent {role}")
+        return _parse_agent_json(text)
+    except (httpx.HTTPError, ValueError, json.JSONDecodeError) as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"LLM agent {role} failed: {e}",
+        ) from e
+
+
 async def run_llm_agents(
     *,
     settings: Settings,
@@ -111,50 +205,36 @@ async def run_llm_agents(
     generated_sql: str,
     exe: ExecuteSqlResponse,
     deterministic_summary: str,
+    sub_results: list[SubResult] | None = None,
+    host_plan: PlanningHostOutput | None = None,
+    analyst_plan: PlanningAnalystOutput | None = None,
 ) -> tuple[str, list[AgentPipelineStep], list[AgentInsight]]:
     """
-    Run 5 sequential OpenAI-compatible LLM calls (mandatory), returning:
-    - answer: Analyst text
-    - pipeline: 5 steps (host→challenger) with phase/detail
-    - agent_messages: 5 chat messages (HOST…CHALLENGER)
+    Run internal enrichment calls (Analyst→Marketing→Finance→Challenger)
+    followed by a final Host composer call.
     """
-    ctx = _context_blob(
+    ctx = _context_blob_compact(
         question=question,
         generated_sql=generated_sql,
         exe=exe,
         deterministic_summary=deterministic_summary,
+        sub_results=sub_results,
+        host_plan=host_plan,
+        analyst_plan=analyst_plan,
     )
 
-    roles: list[PulsecastRole] = ["HOST", "ANALYST", "MARKETING", "FINANCE", "CHALLENGER"]
-    prior: dict[PulsecastRole, _AgentOut] = {}
+    internal_roles: list[PulsecastRole] = ["ANALYST", "MARKETING", "FINANCE", "CHALLENGER"]
+    prior: dict[str, _AgentOut] = {}
     pipeline: list[AgentPipelineStep] = []
-    messages: list[AgentInsight] = []
 
-    for role in roles:
-        try:
-            text_parts: list[str] = []
-            async for delta in chat_complete_stream_text(
-                base_url=settings.openai_base_url,
-                api_key=settings.openai_api_key,
-                model=settings.openai_model,
-                temperature=settings.openai_temperature,
-                timeout_seconds=settings.openai_timeout_seconds,
-                messages=[
-                    {"role": "system", "content": _system_prompt(role)},
-                    {"role": "user", "content": _human_prompt(ctx=ctx, prior=prior)},
-                ],
-            ):
-                text_parts.append(delta)
-            text = "".join(text_parts).strip()
-            if not text:
-                raise ValueError(f"Empty streamed content from agent {role}")
-            out = _parse_agent_json(text)
-        except (httpx.HTTPError, ValueError, json.JSONDecodeError) as e:
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"LLM agent {role} failed: {e}",
-            ) from e
-
+    for role in internal_roles:
+        out = await _run_role_call(
+            settings=settings,
+            role=role,
+            system_prompt=_system_prompt_internal(role),
+            ctx=ctx,
+            prior=prior,
+        )
         prior[role] = out
         pipeline.append(
             AgentPipelineStep(
@@ -164,8 +244,25 @@ async def run_llm_agents(
                 detail=out.detail,
             )
         )
-        messages.append(AgentInsight(role=role, text=out.text))
 
-    analyst_answer = prior["ANALYST"].text if "ANALYST" in prior else messages[1].text
-    return analyst_answer, pipeline, messages
+    host_out = await _run_role_call(
+        settings=settings,
+        role="HOST",
+        system_prompt=_system_prompt_host_composer(),
+        ctx=ctx,
+        prior=prior,
+    )
+    prior["HOST"] = host_out
+    pipeline.append(
+        AgentPipelineStep(
+            id=_agent_id("HOST"),
+            status="completed",
+            phase=host_out.phase,
+            detail=host_out.detail,
+        )
+    )
+
+    answer = host_out.text
+    messages = [AgentInsight(role="HOST", text=answer)]
+    return answer, pipeline, messages
 

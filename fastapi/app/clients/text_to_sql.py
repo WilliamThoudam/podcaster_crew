@@ -19,6 +19,7 @@ async def generate_sql(
     model: str,
     max_nodes: str,
     is_retry: bool,
+    trace_context: dict | None = None,
 ) -> TextToSqlResponse:
     url = settings.text_to_sql_base_url.rstrip("/") + "/v1/chat/completions"
     payload: dict = {
@@ -32,6 +33,8 @@ async def generate_sql(
         "model": model,
         "is_retry": is_retry,
     }
+    if trace_context:
+        payload["trace_context"] = trace_context
     if session_id:
         payload["session_id"] = session_id
 

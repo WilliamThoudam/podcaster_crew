@@ -29,6 +29,7 @@ async def chat_complete_json(
     messages: list[dict[str, str]],
     temperature: float,
     timeout_seconds: float,
+    response_format: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     url = _chat_completions_url(base_url)
     headers = {
@@ -40,6 +41,8 @@ async def chat_complete_json(
         "messages": messages,
         "temperature": temperature,
     }
+    if response_format is not None:
+        payload["response_format"] = response_format
     timeout = httpx.Timeout(timeout_seconds)
     async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.post(url, headers=headers, json=payload)

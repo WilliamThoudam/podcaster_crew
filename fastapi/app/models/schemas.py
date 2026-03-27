@@ -75,6 +75,31 @@ class ExecuteSqlResponse(BaseModel):
     note: str | None = None
 
 
+class PlanningHostOutput(BaseModel):
+    """High-level framing from the HOST agent used to steer Analyst planning."""
+
+    primary_focus: str
+    time_window: str | None = None
+    region_focus: str | None = None
+    metrics: list[str] = Field(default_factory=list)
+    notes: str | None = None
+
+
+class PlanningAnalystOutput(BaseModel):
+    """Analyst-produced decomposition into independently SQL-answerable sub-questions."""
+
+    sub_questions: list[str] = Field(default_factory=list)
+    rationale: str | None = None
+
+
+class SubResult(BaseModel):
+    """One planned sub-question with its generated SQL and execution result."""
+
+    sub_question: str
+    generated_sql: str
+    execute: ExecuteSqlResponse
+
+
 class AgentPipelineStep(BaseModel):
     """BRD agent lane + phase for Pulsecast Agent Status / future UI sync."""
 
@@ -103,6 +128,10 @@ class QAResponse(BaseModel):
     agent_messages: list[AgentInsight] = Field(
         default_factory=list,
         description="Multi-agent narration; Analyst entry mirrors `answer` for SQL-led turns.",
+    )
+    sub_results: list[SubResult] = Field(
+        default_factory=list,
+        description="Results for each planned sub-question (sub_question + generated_sql + execute).",
     )
 
 

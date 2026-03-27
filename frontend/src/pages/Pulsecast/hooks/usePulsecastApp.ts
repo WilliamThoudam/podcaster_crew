@@ -12,18 +12,9 @@ import { streamPulsecastQa } from '../../../services/api/pulsecastQa'
 import { colorToRgb, cumulativeMsBeforeSegment, fmt, segmentIndexAtElapsed } from '../utils'
 import { pathForScreen } from '../../../routes/paths'
 import type { AgentState, PodcastRole, QaMessage, Screen } from '../../../types'
-import type { AgentInsight } from '../../../services/api/pulsecastQa'
+import type { StreamProgressEvent } from '../../../services/api/pulsecastQa'
 
 const WAVEFORM_BARS = 80
-
-const INTERACTION_WELCOME: QaMessage = {
-  id: 'sys-welcome',
-  kind: 'system',
-  role: 'SYSTEM',
-  emoji: '🎙️',
-  color: 'var(--accent)',
-  text: 'Podcast paused for your session. Ask any question about the data and the agents will respond with live SQL analysis.',
-}
 
 function newId(): string {
   return typeof crypto !== 'undefined' && 'randomUUID' in crypto
@@ -39,75 +30,6 @@ const QA_INSIGHT_STYLE: Record<PodcastRole, { emoji: string; color: string }> = 
   CHALLENGER: { emoji: '⚖️', color: 'var(--challenger)' },
 }
 
-function decodeJsonStringFragment(raw: string): string {
-  // Best-effort decode for progressively streamed JSON string fragments.
-  return raw
-    .replace(/\\\\/g, '\u0000')
-    .replace(/\\"/g, '"')
-    .replace(/\\n/g, '\n')
-    .replace(/\\r/g, '\r')
-    .replace(/\\t/g, '\t')
-    .replace(/\u0000/g, '\\')
-}
-
-function createAnswerFieldStreamParser() {
-  let buffer = ''
-  let started = false
-  let done = false
-  let scanIndex = 0
-  let escaped = false
-  let rawValue = ''
-
-  return {
-    push(chunk: string): string | null {
-      if (done) return decodeJsonStringFragment(rawValue)
-      buffer += chunk
-
-      if (!started) {
-        const m = /"answer"\s*:\s*"/.exec(buffer)
-        if (!m) return null
-        started = true
-        scanIndex = m.index + m[0].length
-      }
-
-      for (let i = scanIndex; i < buffer.length; i += 1) {
-        const ch = buffer[i]
-        if (escaped) {
-          rawValue += `\\${ch}`
-          escaped = false
-          continue
-        }
-        if (ch === '\\') {
-          escaped = true
-          continue
-        }
-        if (ch === '"') {
-          done = true
-          scanIndex = i + 1
-          return decodeJsonStringFragment(rawValue)
-        }
-        rawValue += ch
-      }
-      scanIndex = buffer.length
-      return decodeJsonStringFragment(rawValue)
-    },
-  }
-}
-
-function insightToMessage(ins: AgentInsight, generatedSql: string): QaMessage {
-  const role = ins.role in QA_INSIGHT_STYLE ? ins.role : 'ANALYST'
-  const style = QA_INSIGHT_STYLE[role as PodcastRole]
-  return {
-    id: newId(),
-    kind: 'agent',
-    role,
-    emoji: style.emoji,
-    color: style.color,
-    text: ins.text,
-    ...(role === 'ANALYST' ? { sql: generatedSql } : {}),
-  }
-}
-
 export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
   const [isPlaying, setIsPlaying] = useState(false)
   const [totalElapsed, setTotalElapsed] = useState(0)
@@ -121,7 +43,6 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
   const [qaMessages, setQaMessages] = useState<QaMessage[]>([])
 
   const [agentStates, setAgentStates] = useState<AgentState[]>(() => AGENTS.map(() => 'idle'))
-  const [sqlLog, setSqlLog] = useState('// Waiting for query…')
 
   const [interruptOpen, setInterruptOpen] = useState(false)
   const [interruptDraft, setInterruptDraft] = useState('')
@@ -160,9 +81,8 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
   useEffect(() => {
     if (screen !== 'interaction') return
     const id = window.setTimeout(() => {
-      setQaMessages((m) => (m.length === 0 ? [INTERACTION_WELCOME] : m))
+      setQaMessages((m) => m)
       setAgentStates(AGENTS.map(() => 'idle'))
-      setSqlLog('// Waiting for query…')
     }, 0)
     return () => clearTimeout(id)
   }, [screen])
@@ -308,12 +228,135 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
             : `sess-${Date.now()}`
       }
       setAgentStates(AGENTS.map(() => 'idle'))
-      setSqlLog('// Streaming OpenAI completion…')
       const typingId = newId()
       let typingBubbleCreated = false
       try {
-        let streamedChars = 0
-        const answerParser = createAnswerFieldStreamParser()
+        const pushAnalystUpdate = (text: string, sql?: string) => {
+          const markdownText = sql ? `${text}\n\n\`\`\`sql\n${sql}\n\`\`\`` : text
+          setQaMessages((m) => [
+            ...m,
+            {
+              id: newId(),
+              kind: 'agent',
+              role: 'ANALYST',
+              emoji: QA_INSIGHT_STYLE.ANALYST.emoji,
+              color: QA_INSIGHT_STYLE.ANALYST.color,
+              text: markdownText,
+            },
+          ])
+        }
+        let activeTtsMsgId: string | null = null
+        let activeExecMsgId: string | null = null
+        let planMsgId: string | null = null
+        let planText = ''
+        let activeTtsSql = ''
+        let activeExecTable = ''
+        let activeExecStatus = ''
+        const upsertAnalystMessage = (id: string, text: string) => {
+          setQaMessages((m) => {
+            const exists = m.some((msg) => msg.id === id)
+            if (!exists) {
+              return [
+                ...m,
+                {
+                  id,
+                  kind: 'agent',
+                  role: 'ANALYST',
+                  emoji: QA_INSIGHT_STYLE.ANALYST.emoji,
+                  color: QA_INSIGHT_STYLE.ANALYST.color,
+                  text,
+                },
+              ]
+            }
+            return m.map((msg) => (msg.id === id ? { ...msg, text } : msg))
+          })
+        }
+        const onProgress = (event: StreamProgressEvent) => {
+          if (event.type === 'planned_sub_questions_started') {
+            planText = ''
+            const id = newId()
+            planMsgId = id
+            upsertAnalystMessage(id, `Planned sub-questions:\n\n_Planning…_`)
+            return
+          }
+          if (event.type === 'planned_sub_questions_chunk') {
+            if (!planMsgId) planMsgId = newId()
+            planText += event.chunk
+            upsertAnalystMessage(planMsgId, planText)
+            return
+          }
+          if (event.type === 'planned_sub_questions_done') {
+            return
+          }
+          if (event.type === 'sub_question_start') return
+          if (event.type === 'sub_question_done') {
+            return
+          }
+          if (event.type === 'tts_started') {
+            activeTtsSql = ''
+            const id = newId()
+            activeTtsMsgId = id
+            upsertAnalystMessage(id, `Text-to-SQL ${event.index}/${event.total}: ${event.sub_question}\n\n_Generating…_`)
+            return
+          }
+          if (event.type === 'tts_sql_chunk') {
+            if (!activeTtsMsgId) {
+              activeTtsMsgId = newId()
+            }
+            activeTtsSql += event.chunk
+            upsertAnalystMessage(
+              activeTtsMsgId,
+              `Text-to-SQL ${event.index}/${event.total}: ${event.sub_question}\n\n\`\`\`sql\n${activeTtsSql}\n\`\`\``,
+            )
+            return
+          }
+          if (event.type === 'tts_done') {
+            return
+          }
+          if (event.type === 'execute_started') {
+            activeExecTable = ''
+            activeExecStatus = ''
+            const id = newId()
+            activeExecMsgId = id
+            upsertAnalystMessage(id, `Executing ${event.index}/${event.total}: ${event.sub_question}\n\n`)
+            return
+          }
+          if (event.type === 'execute_status_chunk') {
+            if (!activeExecMsgId) {
+              activeExecMsgId = newId()
+            }
+            activeExecStatus += event.chunk
+            upsertAnalystMessage(
+              activeExecMsgId,
+              `Executing ${event.index}/${event.total}: ${event.sub_question}\n\n${activeExecStatus}`,
+            )
+            return
+          }
+          if (event.type === 'execute_table_chunk') {
+            if (!activeExecMsgId) {
+              activeExecMsgId = newId()
+            }
+            activeExecTable += event.chunk
+            upsertAnalystMessage(
+              activeExecMsgId,
+              `Result ${event.index}/${event.total}: ${event.sub_question}\n\n${activeExecTable}`,
+            )
+            return
+          }
+          if (event.type === 'execute_done') {
+            const rc = event.row_count ?? 0
+            if (activeExecMsgId && activeExecTable) {
+              upsertAnalystMessage(
+                activeExecMsgId,
+                `Result ${event.index}/${event.total}: ${event.sub_question} (rows: ${rc})\n\n${activeExecTable}`,
+              )
+            }
+            return
+          }
+          if (event.type === 'sub_question_retry') {
+            pushAnalystUpdate(`Retrying ${event.index}/${event.total}: ${event.reason}`)
+          }
+        }
         const conversation = [
           ...qaMessages
             .filter((m) => m.kind === 'user' && m.role === 'YOU' && typeof m.text === 'string')
@@ -328,46 +371,42 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
           },
           {
             onDelta: (delta) => {
-              streamedChars += delta.length
-              if (streamedChars % 256 < delta.length) {
-                setSqlLog(`// Streaming OpenAI completion… ${streamedChars} chars`)
-              }
-              const preview = answerParser.push(delta)
-              if (typeof preview === 'string') {
-                if (!typingBubbleCreated) {
-                  typingBubbleCreated = true
-                  setQaMessages((m) => [
-                    ...m,
-                    {
-                      id: typingId,
-                      kind: 'agent',
-                      role: 'ANALYST',
-                      emoji: QA_INSIGHT_STYLE.ANALYST.emoji,
-                      color: QA_INSIGHT_STYLE.ANALYST.color,
-                      text: preview,
-                    },
-                  ])
-                } else {
-                  setQaMessages((m) =>
-                    m.map((msg) => (msg.id === typingId ? { ...msg, text: preview } : msg)),
-                  )
-                }
+              if (!typingBubbleCreated) {
+                typingBubbleCreated = true
+                setQaMessages((m) => [
+                  ...m,
+                  {
+                    id: typingId,
+                    kind: 'agent',
+                    role: 'HOST',
+                    emoji: QA_INSIGHT_STYLE.HOST.emoji,
+                    color: QA_INSIGHT_STYLE.HOST.color,
+                    text: delta,
+                  },
+                ])
+              } else {
+                setQaMessages((m) =>
+                  m.map((msg) => (msg.id === typingId ? { ...msg, text: `${msg.text}${delta}` } : msg)),
+                )
               }
             },
+            onProgress,
           },
         )
-        setSqlLog('// Generating SQL query…')
-        const ran = result.execute.query ?? result.generated_sql
-        setSqlLog(ran)
         setAgentStates(AGENTS.map(() => 'idle'))
-        if (typingBubbleCreated) {
-          setQaMessages((m) => m.filter((msg) => msg.id !== typingId))
+        if (!typingBubbleCreated) {
+          setQaMessages((m) => [
+            ...m,
+            {
+              id: newId(),
+              kind: 'agent',
+              role: 'HOST',
+              emoji: QA_INSIGHT_STYLE.HOST.emoji,
+              color: QA_INSIGHT_STYLE.HOST.color,
+              text: result.answer,
+            },
+          ])
         }
-        const insights =
-          result.agent_messages && result.agent_messages.length > 0
-            ? result.agent_messages
-            : [{ role: 'ANALYST' as const, text: result.answer }]
-        setQaMessages((m) => [...m, ...insights.map((ins) => insightToMessage(ins, result.generated_sql))])
         const synth = window.speechSynthesis
         if (synth) {
           synth.cancel()
@@ -381,7 +420,6 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
         if (typingBubbleCreated) {
           setQaMessages((m) => m.filter((msgItem) => msgItem.id !== typingId))
         }
-        setSqlLog(`// Error: ${msg}`)
         setAgentStates(AGENTS.map(() => 'idle'))
         setQaMessages((m) => [
           ...m,
@@ -501,7 +539,6 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
     sendQA,
     qaMessages,
     agentStates,
-    sqlLog,
     voiceRecording,
     toggleVoice,
     toast,

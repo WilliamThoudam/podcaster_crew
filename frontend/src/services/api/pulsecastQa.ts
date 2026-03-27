@@ -32,13 +32,14 @@ export type AgentInsight = {
   text: string
 }
 
-export type QAResponse = {
+export type SubResult = {
+  sub_question: string
   generated_sql: string
-  answer: string
   execute: ExecuteSqlPayload
-  text_to_sql_error?: string | null
-  pipeline?: AgentPipelineStep[]
-  agent_messages?: AgentInsight[]
+}
+
+export type QAResponse = {
+  answer: string
 }
 
 export type QARequestBody = {
@@ -91,7 +92,29 @@ type OpenAIChunk = {
 
 type StreamCallbacks = {
   onDelta?: (deltaText: string) => void
+  onProgress?: (event: StreamProgressEvent) => void
 }
+
+export type StreamProgressEvent =
+  | { type: 'planned_sub_questions_started'; total: number }
+  | { type: 'planned_sub_questions_chunk'; total: number; chunk: string }
+  | { type: 'planned_sub_questions_done'; total: number }
+  | { type: 'sub_question_start'; index: number; total: number; sub_question: string }
+  | { type: 'sub_question_done'; index: number; total: number; sub_question: string; row_count?: number | null }
+  | { type: 'tts_started'; index: number; total: number; sub_question: string }
+  | { type: 'tts_sql_chunk'; index: number; total: number; sub_question: string; chunk: string }
+  | { type: 'tts_done'; index: number; total: number; sub_question: string }
+  | { type: 'execute_started'; index: number; total: number; sub_question: string }
+  | { type: 'execute_status_chunk'; index: number; total: number; sub_question: string; chunk: string }
+  | { type: 'execute_table_chunk'; index: number; total: number; sub_question: string; chunk: string }
+  | { type: 'execute_done'; index: number; total: number; sub_question: string; row_count?: number | null }
+  | {
+      type: 'sub_question_retry'
+      index: number
+      total: number
+      sub_question: string
+      reason: 'duplicate_sql_detected'
+    }
 
 function apiBase(): string {
   const b = import.meta.env.VITE_PULSECAST_API_URL
@@ -140,7 +163,11 @@ export async function postPulsecastQa(body: QARequestBody): Promise<QAResponse> 
   const completion = (await res.json()) as OpenAIChatResponse
   const content = completion.choices?.[0]?.message?.content
   if (!content) throw new Error('Missing assistant content in completion response')
-  return JSON.parse(content) as QAResponse
+  try {
+    return JSON.parse(content) as QAResponse
+  } catch {
+    return { answer: content }
+  }
 }
 
 function parseSseEvents(chunk: string): string[] {
@@ -163,7 +190,7 @@ export async function streamPulsecastQa(
       body.messages && body.messages.length > 0
         ? body.messages
         : [{ role: 'user', content: body.question }],
-    response_format: { type: 'json_object' },
+    response_format: { type: 'text' },
     user: body.session_id,
   }
   const res = await fetch(`${apiBase()}/v1/chat/completions`, {
@@ -205,6 +232,16 @@ export async function streamPulsecastQa(
       const chunk = JSON.parse(dataLine) as OpenAIChunk
       const delta = chunk.choices?.[0]?.delta?.content
       if (delta) {
+        const progressMatch = delta.match(/^<<PULSECAST_PROGRESS:(.+)>>$/s)
+        if (progressMatch) {
+          try {
+            const event = JSON.parse(progressMatch[1]) as StreamProgressEvent
+            callbacks?.onProgress?.(event)
+          } catch {
+            /* ignore malformed progress marker */
+          }
+          continue
+        }
         assembled += delta
         callbacks?.onDelta?.(delta)
       }
@@ -214,5 +251,5 @@ export async function streamPulsecastQa(
   if (!assembled.trim()) {
     throw new Error('No assistant content received from stream')
   }
-  return JSON.parse(assembled) as QAResponse
+  return { answer: assembled }
 }

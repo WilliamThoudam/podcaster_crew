@@ -3,6 +3,7 @@ import { paths } from '../../routes/paths'
 import { type Screen, isPulsecastScreen } from '../../types'
 import { PODCAST_SCRIPT, TOTAL_MS } from './constants'
 import { usePulsecastApp } from './hooks/usePulsecastApp'
+import { PulsecastMarkdown } from './components/PulsecastMarkdown'
 import './pulsecast.css'
 
 const SCREENS: { id: Screen; icon: string; title: string }[] = [
@@ -461,13 +462,7 @@ export function Pulsecast() {
                         <div
                           className={`bubble-text${m.kind === 'user' ? ' user-bubble' : ''}`}
                         >
-                          {m.text}
-                          {m.sql ? (
-                            <div className="sql-block">
-                              <span className="sql-label">SQL EXECUTED</span>
-                              <span>{m.sql}</span>
-                            </div>
-                          ) : null}
+                          {m.kind === 'user' ? m.text : <PulsecastMarkdown content={m.text} />}
                         </div>
                       </div>
                     </div>
@@ -510,10 +505,6 @@ export function Pulsecast() {
                       </div>
                     )
                   })}
-                </div>
-                <div>
-                  <div className="status-section-title">SQL Log</div>
-                  <div className="sql-log">{app.sqlLog}</div>
                 </div>
               </div>
             </div>

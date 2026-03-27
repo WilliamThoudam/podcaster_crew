@@ -978,3 +978,98 @@ body::before {
 .region-bar-wrap { flex: 1; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
 .region-bar-fill { height: 100%; border-radius: 3px; transition: width 1s ease; }
 .region-val { font-size: 11px; color: var(--text2); width: 45px; text-align: right; font-family: 'DM Mono', monospace; }
+
+.pulsecast-markdown {
+  color: var(--text);
+  line-height: 1.5;
+}
+
+.pulsecast-markdown p {
+  margin: 0 0 10px 0;
+}
+
+.pulsecast-markdown p:last-child {
+  margin-bottom: 0;
+}
+
+.pulsecast-markdown h1,
+.pulsecast-markdown h2,
+.pulsecast-markdown h3,
+.pulsecast-markdown h4 {
+  font-family: 'Syne', sans-serif;
+  margin: 0 0 8px 0;
+}
+
+.pulsecast-markdown ul,
+.pulsecast-markdown ol {
+  margin: 0 0 10px 18px;
+}
+
+.pulsecast-markdown blockquote {
+  border-left: 2px solid var(--accent);
+  margin: 10px 0;
+  padding-left: 10px;
+  color: var(--text2);
+}
+
+.pulsecast-markdown pre {
+  background: rgba(19, 29, 46, 0.8);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin: 10px 0;
+  white-space: pre-wrap;       /* allow long SQL lines to wrap */
+  word-break: break-word;      /* break long tokens if needed */
+  overflow-x: hidden;          /* no horizontal scrollbar */
+}
+
+.pulsecast-markdown code {
+  font-family: 'DM Mono', monospace;
+  font-size: 12px;
+}
+
+/* Markdown tables (executed SQL results) */
+.pulsecast-table-wrapper {
+  max-width: 100%;
+  overflow-x: auto;
+  margin: 10px 0 4px 0;
+}
+
+.pulsecast-table {
+  border-collapse: collapse;
+  font-size: 12px;
+  background: var(--surface);
+  border-radius: 10px;
+  min-width: max-content; /* width grows with columns */
+}
+
+.pulsecast-table thead {
+  background: rgba(19, 29, 46, 0.95);
+}
+
+.pulsecast-table th {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  font-family: 'DM Mono', monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 10px;
+  color: var(--text3);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.pulsecast-table td {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text2);
+  white-space: nowrap;
+}
+
+.pulsecast-table tbody tr:nth-child(even) {
+  background: rgba(13, 20, 32, 0.9);
+}
+
+.pulsecast-table tbody tr:last-child td {
+  border-bottom: none;
+}

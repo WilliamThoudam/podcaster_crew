@@ -229,6 +229,7 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
       }
       setAgentStates(AGENTS.map(() => 'idle'))
       const typingId = newId()
+      let summarizingMsgId: string | null = null
       let typingBubbleCreated = false
       try {
         const pushAnalystUpdate = (text: string, sql?: string) => {
@@ -247,6 +248,8 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
         }
         let activeTtsMsgId: string | null = null
         let activeExecMsgId: string | null = null
+        let hostPlanMsgId: string | null = null
+        let hostPlanText = ''
         let planMsgId: string | null = null
         let planText = ''
         let activeTtsLabel = ''
@@ -255,6 +258,7 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
         let activeExecLabel = ''
         let activeExecGenerating = ''
         let activeExecTable = ''
+        let summarizingText = ''
         const upsertAnalystMessage = (id: string, text: string) => {
           setQaMessages((m) => {
             const exists = m.some((msg) => msg.id === id)
@@ -274,12 +278,52 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
             return m.map((msg) => (msg.id === id ? { ...msg, text } : msg))
           })
         }
+        const upsertHostMessage = (id: string, text: string) => {
+          setQaMessages((m) => {
+            const exists = m.some((msg) => msg.id === id)
+            if (!exists) {
+              return [
+                ...m,
+                {
+                  id,
+                  kind: 'agent',
+                  role: 'HOST',
+                  emoji: QA_INSIGHT_STYLE.HOST.emoji,
+                  color: QA_INSIGHT_STYLE.HOST.color,
+                  text,
+                },
+              ]
+            }
+            return m.map((msg) => (msg.id === id ? { ...msg, text } : msg))
+          })
+        }
         const onProgress = (event: StreamProgressEvent) => {
+          if (event.type === 'host_plan_started') {
+            hostPlanText = ''
+            const id = newId()
+            hostPlanMsgId = id
+            upsertHostMessage(id, '_Planning…_')
+            return
+          }
+          if (event.type === 'host_plan_chunk') {
+            if (!hostPlanMsgId) {
+              hostPlanMsgId = newId()
+            }
+            hostPlanText += event.chunk
+            upsertHostMessage(hostPlanMsgId, hostPlanText)
+            return
+          }
+          if (event.type === 'host_plan_done') {
+            return
+          }
           if (event.type === 'planned_sub_questions_started') {
             planText = ''
             const id = newId()
             planMsgId = id
-            upsertAnalystMessage(id, `Planned sub-questions:\n\n_Planning…_`)
+            upsertAnalystMessage(
+              id,
+              `To answer this, I will break it down into steps:\n\n_Planning…_`,
+            )
             return
           }
           if (event.type === 'planned_sub_questions_chunk') {
@@ -388,6 +432,23 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
           if (event.type === 'sub_question_retry') {
             pushAnalystUpdate(`Retrying ${event.index}/${event.total}: ${event.reason}`)
           }
+          if (event.type === 'summarizing_started') {
+            summarizingText = ''
+            summarizingMsgId = newId()
+            upsertHostMessage(summarizingMsgId, '_Summarizing…_')
+            return
+          }
+          if (event.type === 'summarizing_chunk') {
+            if (!summarizingMsgId) {
+              summarizingMsgId = newId()
+            }
+            summarizingText += event.chunk
+            upsertHostMessage(summarizingMsgId, summarizingText)
+            return
+          }
+          if (event.type === 'summarizing_done') {
+            return
+          }
         }
         const conversation = [
           ...qaMessages
@@ -403,22 +464,33 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
           },
           {
             onDelta: (delta) => {
+              const streamMsgId = summarizingMsgId ?? typingId
               if (!typingBubbleCreated) {
                 typingBubbleCreated = true
-                setQaMessages((m) => [
-                  ...m,
-                  {
-                    id: typingId,
-                    kind: 'agent',
-                    role: 'HOST',
-                    emoji: QA_INSIGHT_STYLE.HOST.emoji,
-                    color: QA_INSIGHT_STYLE.HOST.color,
-                    text: delta,
-                  },
-                ])
+                setQaMessages((m) => {
+                  const exists = m.some((msg) => msg.id === streamMsgId)
+                  if (exists) {
+                    return m.map((msg) =>
+                      msg.id === streamMsgId ? { ...msg, text: delta } : msg,
+                    )
+                  }
+                  return [
+                    ...m,
+                    {
+                      id: streamMsgId,
+                      kind: 'agent',
+                      role: 'HOST',
+                      emoji: QA_INSIGHT_STYLE.HOST.emoji,
+                      color: QA_INSIGHT_STYLE.HOST.color,
+                      text: delta,
+                    },
+                  ]
+                })
               } else {
                 setQaMessages((m) =>
-                  m.map((msg) => (msg.id === typingId ? { ...msg, text: `${msg.text}${delta}` } : msg)),
+                  m.map((msg) =>
+                    msg.id === streamMsgId ? { ...msg, text: `${msg.text}${delta}` } : msg,
+                  ),
                 )
               }
             },
@@ -450,7 +522,8 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e)
         if (typingBubbleCreated) {
-          setQaMessages((m) => m.filter((msgItem) => msgItem.id !== typingId))
+          const streamMsgId = summarizingMsgId ?? typingId
+          setQaMessages((m) => m.filter((msgItem) => msgItem.id !== streamMsgId))
         }
         setAgentStates(AGENTS.map(() => 'idle'))
         setQaMessages((m) => [

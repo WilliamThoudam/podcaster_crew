@@ -1,3 +1,4 @@
+import { useLayoutEffect, useRef } from 'react'
 import { Navigate, useNavigate, useParams } from 'react-router-dom'
 import { paths } from '../../routes/paths'
 import { type Screen, isPulsecastScreen } from '../../types'
@@ -18,6 +19,41 @@ export function Pulsecast() {
   const { screen: screenParam } = useParams<{ screen: string }>()
   const validated: Screen | null = isPulsecastScreen(screenParam) ? screenParam : null
   const app = usePulsecastApp(validated ?? 'dashboard', navigate)
+  const qaMessagesScrollRef = useRef<HTMLDivElement>(null)
+  const qaMessagesInnerRef = useRef<HTMLDivElement>(null)
+  /** When true, new content keeps the viewport pinned to the latest message (streaming). */
+  const qaStickToBottomRef = useRef(true)
+
+  const onQaMessagesScroll = () => {
+    const el = qaMessagesScrollRef.current
+    if (!el) return
+    const slack = 96
+    qaStickToBottomRef.current =
+      el.scrollHeight - el.scrollTop - el.clientHeight <= slack
+  }
+
+  useLayoutEffect(() => {
+    const el = qaMessagesScrollRef.current
+    if (!el) return
+    const last = app.qaMessages[app.qaMessages.length - 1]
+    if (last?.kind === 'user') {
+      qaStickToBottomRef.current = true
+    }
+    if (!qaStickToBottomRef.current) return
+    el.scrollTop = el.scrollHeight
+  }, [app.qaMessages])
+
+  useLayoutEffect(() => {
+    const outer = qaMessagesScrollRef.current
+    const inner = qaMessagesInnerRef.current
+    if (!outer || !inner) return
+    const ro = new ResizeObserver(() => {
+      if (!qaStickToBottomRef.current) return
+      outer.scrollTop = outer.scrollHeight
+    })
+    ro.observe(inner)
+    return () => ro.disconnect()
+  }, [app.qaMessages.length])
 
   if (validated === null) {
     return <Navigate to={paths.dashboard} replace />
@@ -450,23 +486,29 @@ export function Pulsecast() {
           >
             <div className="interaction-body">
               <div className="qa-panel">
-                <div className="qa-messages">
-                  {app.qaMessages.map((m) => (
-                    <div key={m.id} className="chat-bubble">
-                      <div className="bubble-body">
-                        <div className="bubble-meta">
-                          <span className="bubble-name" style={{ color: m.color }}>
-                            {m.role}
-                          </span>
-                        </div>
-                        <div
-                          className={`bubble-text${m.kind === 'user' ? ' user-bubble' : ''}`}
-                        >
-                          {m.kind === 'user' ? m.text : <PulsecastMarkdown content={m.text} />}
+                <div
+                  className="qa-messages"
+                  ref={qaMessagesScrollRef}
+                  onScroll={onQaMessagesScroll}
+                >
+                  <div className="qa-messages-inner" ref={qaMessagesInnerRef}>
+                    {app.qaMessages.map((m) => (
+                      <div key={m.id} className="chat-bubble">
+                        <div className="bubble-body">
+                          <div className="bubble-meta">
+                            <span className="bubble-name" style={{ color: m.color }}>
+                              {m.role}
+                            </span>
+                          </div>
+                          <div
+                            className={`bubble-text${m.kind === 'user' ? ' user-bubble' : ''}`}
+                          >
+                            {m.kind === 'user' ? m.text : <PulsecastMarkdown content={m.text} />}
+                          </div>
                         </div>
                       </div>
-                    </div>
-                  ))}
+                    ))}
+                  </div>
                 </div>
                 <div className="qa-input-bar">
                   <button

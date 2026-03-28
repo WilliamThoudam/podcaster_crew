@@ -96,6 +96,9 @@ type StreamCallbacks = {
 }
 
 export type StreamProgressEvent =
+  | { type: 'host_plan_started' }
+  | { type: 'host_plan_chunk'; chunk: string }
+  | { type: 'host_plan_done' }
   | { type: 'planned_sub_questions_started'; total: number }
   | { type: 'planned_sub_questions_chunk'; total: number; chunk: string }
   | { type: 'planned_sub_questions_done'; total: number }
@@ -118,6 +121,9 @@ export type StreamProgressEvent =
       sub_question: string
       reason: 'duplicate_sql_detected'
     }
+  | { type: 'summarizing_started' }
+  | { type: 'summarizing_chunk'; chunk: string }
+  | { type: 'summarizing_done' }
 
 function apiBase(): string {
   const b = import.meta.env.VITE_PULSECAST_API_URL

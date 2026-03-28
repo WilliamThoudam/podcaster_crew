@@ -35,8 +35,8 @@ ProgressCallback = Callable[[dict[str, Any]], Awaitable[None] | None]
 # -----------------------------------------------------------------------------
 # SSE progress stream pacing — used for every _emit_text_chunks step.
 # -----------------------------------------------------------------------------
-STREAM_CHUNK_SIZE = 10
-STREAM_DELAY_S = 0.06
+STREAM_CHUNK_SIZE = 2
+STREAM_DELAY_S = 0.001
 
 
 def _extract_last_user_question(req: OpenAIChatCompletionRequest) -> str:
@@ -172,8 +172,20 @@ async def build_completion_payload(
     model = settings.default_model
     max_nodes = settings.default_max_nodes
 
-    # 1) Planning stage: Host then Analyst to produce sub_questions.
+    # 1) Planning stage: Host (streamed to client) then Analyst sub_questions.
     host_plan: PlanningHostOutput = await run_host_planner(settings=settings, question=question)
+    await _emit_progress(on_progress, {"type": "host_plan_started"})
+    host_line = (host_plan.primary_focus or "").strip() or question
+    await _emit_text_chunks(
+        on_progress=on_progress,
+        base_event={},
+        text=host_line,
+        event_type="host_plan_chunk",
+        chunk_size=STREAM_CHUNK_SIZE,
+        delay_s=STREAM_DELAY_S,
+    )
+    await _emit_progress(on_progress, {"type": "host_plan_done"})
+
     analyst_plan: PlanningAnalystOutput = await run_analyst_planner(
         settings=settings,
         question=question,
@@ -181,7 +193,7 @@ async def build_completion_payload(
     )
     total_sub = len(analyst_plan.sub_questions)
     await _emit_progress(on_progress, {"type": "planned_sub_questions_started", "total": total_sub})
-    plan_md = "Planned sub-questions:\n" + "\n".join(
+    plan_md = "To answer this, I will break it down into steps:\n\n" + "\n".join(
         f"{i + 1}. {sq}" for i, sq in enumerate(analyst_plan.sub_questions)
     )
     await _emit_text_chunks(
@@ -444,8 +456,18 @@ async def build_completion_payload(
             detail="No successful sub-question results were produced",
         )
 
-    # 3) Deterministic summary and multi-agent reasoning use the primary result for now.
+    # 3) Deterministic summary, then multi-agent reasoning (stream "Summarizing…" first).
     deterministic = build_answer_summary(primary_exe)
+    await _emit_progress(on_progress, {"type": "summarizing_started"})
+    await _emit_text_chunks(
+        on_progress=on_progress,
+        base_event={},
+        text="Summarizing…",
+        event_type="summarizing_chunk",
+        chunk_size=STREAM_CHUNK_SIZE,
+        delay_s=STREAM_DELAY_S,
+    )
+    await _emit_progress(on_progress, {"type": "summarizing_done"})
     answer, pipeline, agent_messages = await run_llm_agents(
         settings=settings,
         question=question,
@@ -502,12 +524,11 @@ async def stream_completion_sse(
         started = True
         yield f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), role='assistant')}\n\n"
 
-    # Use very small chunks + pacing so clients render truly token-like typing.
-    step = 2
-    for i in range(0, len(content), step):
-        part = content[i : i + step]
+    # Same chunk size + delay as PULSECAST_PROGRESS streams (see STREAM_* at top of module).
+    for i in range(0, len(content), STREAM_CHUNK_SIZE):
+        part = content[i : i + STREAM_CHUNK_SIZE]
         yield f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), content=part)}\n\n"
-        await asyncio.sleep(0.06)
+        await asyncio.sleep(STREAM_DELAY_S)
 
     yield f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), finish_reason='stop')}\n\n"
     yield "data: [DONE]\n\n"

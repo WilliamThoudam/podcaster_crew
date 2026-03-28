@@ -715,6 +715,9 @@ body::before {
   flex: 1;
   overflow-y: auto;
   padding: 24px;
+}
+
+.qa-messages-inner {
   display: flex;
   flex-direction: column;
   gap: 16px;

@@ -41,6 +41,7 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
   const [qaInput, setQaInput] = useState('')
   const qaSessionRef = useRef<string | null>(null)
   const [qaMessages, setQaMessages] = useState<QaMessage[]>([])
+  const [qaStreaming, setQaStreaming] = useState(false)
 
   const [agentStates, setAgentStates] = useState<AgentState[]>(() => AGENTS.map(() => 'idle'))
 
@@ -228,6 +229,7 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
             : `sess-${Date.now()}`
       }
       setAgentStates(AGENTS.map(() => 'idle'))
+      setQaStreaming(true)
       const typingId = newId()
       let summarizingMsgId: string | null = null
       let typingBubbleCreated = false
@@ -537,6 +539,8 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
             text: msg,
           },
         ])
+      } finally {
+        setQaStreaming(false)
       }
     },
     [qaInput, qaMessages, showToast],
@@ -643,6 +647,7 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
     setQaInput,
     sendQA,
     qaMessages,
+    qaStreaming,
     agentStates,
     voiceRecording,
     toggleVoice,

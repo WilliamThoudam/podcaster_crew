@@ -5,6 +5,7 @@ import { type Screen, isPulsecastScreen } from '../../types'
 import { PODCAST_SCRIPT, TOTAL_MS } from './constants'
 import { usePulsecastApp } from './hooks/usePulsecastApp'
 import { PulsecastMarkdown } from './components/PulsecastMarkdown'
+import { QaThinkingDots } from './components/QaThinkingDots'
 import './pulsecast.css'
 
 const SCREENS: { id: Screen; icon: string; title: string }[] = [
@@ -41,7 +42,7 @@ export function Pulsecast() {
     }
     if (!qaStickToBottomRef.current) return
     el.scrollTop = el.scrollHeight
-  }, [app.qaMessages])
+  }, [app.qaMessages, app.qaStreaming])
 
   useLayoutEffect(() => {
     const outer = qaMessagesScrollRef.current
@@ -508,6 +509,11 @@ export function Pulsecast() {
                         </div>
                       </div>
                     ))}
+                    {app.qaStreaming ? (
+                      <div className="qa-thinking-row">
+                        <QaThinkingDots />
+                      </div>
+                    ) : null}
                   </div>
                 </div>
                 <div className="qa-input-bar">

@@ -32,6 +32,12 @@ from app.services.qa_pipeline import build_answer_summary, validate_and_normaliz
 
 ProgressCallback = Callable[[dict[str, Any]], Awaitable[None] | None]
 
+# -----------------------------------------------------------------------------
+# SSE progress stream pacing — used for every _emit_text_chunks step.
+# -----------------------------------------------------------------------------
+STREAM_CHUNK_SIZE = 10
+STREAM_DELAY_S = 0.06
+
 
 def _extract_last_user_question(req: OpenAIChatCompletionRequest) -> str:
     for msg in reversed(req.messages):
@@ -101,9 +107,9 @@ async def _emit_text_chunks(
     on_progress: ProgressCallback | None,
     base_event: dict[str, Any],
     text: str,
-    chunk_size: int = 64,
+    chunk_size: int = STREAM_CHUNK_SIZE,
     event_type: str = "tts_sql_chunk",
-    delay_s: float = 0.06,
+    delay_s: float = STREAM_DELAY_S,
 ) -> None:
     s = text or ""
     for i in range(0, len(s), chunk_size):
@@ -182,9 +188,7 @@ async def build_completion_payload(
         on_progress=on_progress,
         base_event={"total": total_sub},
         text=plan_md,
-        chunk_size=2,
         event_type="planned_sub_questions_chunk",
-        delay_s=0.05,
     )
     await _emit_progress(on_progress, {"type": "planned_sub_questions_done", "total": total_sub})
 
@@ -223,9 +227,7 @@ async def build_completion_payload(
                     "sub_question": sub_q,
                 },
                 text=f"Text-to-SQL {idx + 1}/{len(analyst_plan.sub_questions)}: {sub_q}",
-                chunk_size=2,
                 event_type="tts_label_chunk",
-                delay_s=0.04,
             )
             # After the full label, stream "Generating…" on the next line (separate phase)
             await _emit_text_chunks(
@@ -236,9 +238,7 @@ async def build_completion_payload(
                     "sub_question": sub_q,
                 },
                 text="Generating…",
-                chunk_size=1,
                 event_type="tts_generating_chunk",
-                delay_s=0.045,
             )
             tts = await generate_sql(
                 settings=settings,
@@ -286,9 +286,7 @@ async def build_completion_payload(
                 "sub_question": sub_q,
             },
             text=sql,
-            chunk_size=10,
             event_type="tts_sql_chunk",
-            delay_s=0.05,
         )
         await _emit_progress(
             on_progress,
@@ -361,9 +359,7 @@ async def build_completion_payload(
                     "sub_question": sub_q,
                 },
                 text=f"Executing {idx + 1}/{len(analyst_plan.sub_questions)}: {sub_q}",
-                chunk_size=2,
                 event_type="execute_label_chunk",
-                delay_s=0.04,
             )
             await _emit_text_chunks(
                 on_progress=on_progress,
@@ -373,9 +369,7 @@ async def build_completion_payload(
                     "sub_question": sub_q,
                 },
                 text="Executing…",
-                chunk_size=1,
                 event_type="execute_generating_chunk",
-                delay_s=0.045,
             )
             exe = await execute_sql_client(
                 settings=settings,
@@ -420,9 +414,7 @@ async def build_completion_payload(
                 "sub_question": sub_q,
             },
             text=table_md,
-            chunk_size=10,
             event_type="execute_table_chunk",
-            delay_s=0.05,
         )
         await _emit_progress(
             on_progress,

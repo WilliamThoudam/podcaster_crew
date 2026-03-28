@@ -32,6 +32,16 @@ class OpenAIChatCompletionRequest(BaseModel):
     user: str | None = None
 
 
+class PulsecastChatResumeRequest(BaseModel):
+    """Resume a paused stream after sql_approval_required (HITL)."""
+
+    resume_token: str = Field(..., min_length=1)
+    approved: bool
+    edited_question: str | None = None
+    stream: bool = True
+    model: str = "pulsecast-qa"
+
+
 class QARequest(BaseModel):
     question: str = Field(..., min_length=1, description="Natural language question")
     user_id: int | None = None

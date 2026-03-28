@@ -133,13 +133,17 @@ async def run_qa(settings: Settings, req: QARequest) -> QAResponse:
         )
 
     deterministic = build_answer_summary(exe)
-    answer, pipeline, agent_messages = await run_llm_agents(
+    agents_out = await run_llm_agents(
         settings=settings,
         question=req.question.strip(),
         generated_sql=sql,
         exe=exe,
         deterministic_summary=deterministic,
+        allow_sql_approval_pause=False,
     )
+    answer = agents_out.answer
+    pipeline = agents_out.pipeline
+    agent_messages = agents_out.messages
     return QAResponse(
         generated_sql=sql,
         answer=answer,

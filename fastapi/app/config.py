@@ -32,6 +32,10 @@ class Settings(BaseSettings):
 
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
+    # Moderated Marketing/Finance/Challenger multi-round discussion (see pulsecast_llm_agents)
+    pulsecast_discussion_enabled: bool = True
+    pulsecast_discussion_max_rounds: int = 3
+
 
 @lru_cache
 def get_settings() -> Settings:

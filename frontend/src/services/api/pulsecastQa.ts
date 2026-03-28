@@ -80,6 +80,22 @@ type StreamCallbacks = {
   onProgress?: (event: StreamProgressEvent) => void
 }
 
+export type StreamQaOutcome =
+  | { kind: 'complete'; answer: string }
+  | {
+      kind: 'sql_approval_required'
+      resume_token: string
+      proposed_sub_question: string
+      rationale: string | null
+    }
+
+export type PulsecastResumeRequestBody = {
+  resume_token: string
+  approved: boolean
+  edited_question?: string
+  session_id?: string
+}
+
 export type StreamProgressEvent =
   | { type: 'host_plan_started' }
   | { type: 'host_plan_chunk'; chunk: string }
@@ -109,6 +125,13 @@ export type StreamProgressEvent =
   | { type: 'summarizing_started' }
   | { type: 'summarizing_chunk'; chunk: string }
   | { type: 'summarizing_done' }
+  | {
+      type: 'sql_approval_required'
+      resume_token: string
+      proposed_sub_question: string
+      rationale?: string | null
+    }
+  | { type: 'sql_followup_declined' }
 
 function apiBase(): string {
   const b = import.meta.env.VITE_PULSECAST_API_URL
@@ -173,10 +196,81 @@ function parseSseEvents(chunk: string): string[] {
     .map((block) => block.slice('data:'.length).trim())
 }
 
+type ConsumeSseResult =
+  | { outcome: 'complete'; assembled: string }
+  | {
+      outcome: 'sql_approval_required'
+      resume_token: string
+      proposed_sub_question: string
+      rationale: string | null
+    }
+
+async function consumeSseChatStream(
+  res: Response,
+  callbacks?: StreamCallbacks,
+): Promise<ConsumeSseResult> {
+  if (!res.body) throw new Error('Streaming response body is unavailable')
+
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let rawBuffer = ''
+  let assembled = ''
+  let sqlApproval:
+    | { resume_token: string; proposed_sub_question: string; rationale: string | null }
+    | undefined
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    rawBuffer += decoder.decode(value, { stream: true })
+
+    const boundary = rawBuffer.lastIndexOf('\n\n')
+    if (boundary === -1) continue
+
+    const ready = rawBuffer.slice(0, boundary + 2)
+    rawBuffer = rawBuffer.slice(boundary + 2)
+
+    for (const dataLine of parseSseEvents(ready)) {
+      if (dataLine === '[DONE]') continue
+      const chunk = JSON.parse(dataLine) as OpenAIChunk
+      const delta = chunk.choices?.[0]?.delta?.content
+      if (delta) {
+        const progressMatch = delta.match(/^<<PULSECAST_PROGRESS:(.+)>>$/s)
+        if (progressMatch) {
+          try {
+            const event = JSON.parse(progressMatch[1]) as StreamProgressEvent
+            if (event.type === 'sql_approval_required') {
+              sqlApproval = {
+                resume_token: event.resume_token,
+                proposed_sub_question: event.proposed_sub_question,
+                rationale: event.rationale ?? null,
+              }
+            }
+            callbacks?.onProgress?.(event)
+          } catch {
+            /* ignore malformed progress marker */
+          }
+          continue
+        }
+        assembled += delta
+        callbacks?.onDelta?.(delta)
+      }
+    }
+  }
+
+  if (!assembled.trim()) {
+    if (sqlApproval) {
+      return { outcome: 'sql_approval_required', ...sqlApproval }
+    }
+    throw new Error('No assistant content received from stream')
+  }
+  return { outcome: 'complete', assembled }
+}
+
 export async function streamPulsecastQa(
   body: QARequestBody,
   callbacks?: StreamCallbacks,
-): Promise<QAResponse> {
+): Promise<StreamQaOutcome> {
   const req: OpenAIChatRequest = {
     model: 'pulsecast-qa',
     stream: true,
@@ -203,47 +297,50 @@ export async function streamPulsecastQa(
     }
     throw new Error(msg)
   }
-  if (!res.body) throw new Error('Streaming response body is unavailable')
 
-  const reader = res.body.getReader()
-  const decoder = new TextDecoder()
-  let rawBuffer = ''
-  let assembled = ''
-
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    rawBuffer += decoder.decode(value, { stream: true })
-
-    const boundary = rawBuffer.lastIndexOf('\n\n')
-    if (boundary === -1) continue
-
-    const ready = rawBuffer.slice(0, boundary + 2)
-    rawBuffer = rawBuffer.slice(boundary + 2)
-
-    for (const dataLine of parseSseEvents(ready)) {
-      if (dataLine === '[DONE]') continue
-      const chunk = JSON.parse(dataLine) as OpenAIChunk
-      const delta = chunk.choices?.[0]?.delta?.content
-      if (delta) {
-        const progressMatch = delta.match(/^<<PULSECAST_PROGRESS:(.+)>>$/s)
-        if (progressMatch) {
-          try {
-            const event = JSON.parse(progressMatch[1]) as StreamProgressEvent
-            callbacks?.onProgress?.(event)
-          } catch {
-            /* ignore malformed progress marker */
-          }
-          continue
-        }
-        assembled += delta
-        callbacks?.onDelta?.(delta)
-      }
+  const raw = await consumeSseChatStream(res, callbacks)
+  if (raw.outcome === 'sql_approval_required') {
+    return {
+      kind: 'sql_approval_required',
+      resume_token: raw.resume_token,
+      proposed_sub_question: raw.proposed_sub_question,
+      rationale: raw.rationale,
     }
   }
+  return { kind: 'complete', answer: raw.assembled }
+}
 
-  if (!assembled.trim()) {
-    throw new Error('No assistant content received from stream')
+export async function streamPulsecastResume(
+  body: PulsecastResumeRequestBody,
+  callbacks?: StreamCallbacks,
+): Promise<QAResponse> {
+  const req = {
+    model: 'pulsecast-qa',
+    stream: true,
+    resume_token: body.resume_token,
+    approved: body.approved,
+    edited_question: body.edited_question,
+    user: body.session_id,
   }
-  return { answer: assembled }
+  const res = await fetch(`${apiBase()}/v1/chat/completions/resume`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+  })
+  if (!res.ok) {
+    let msg = res.statusText
+    try {
+      const j = (await res.json()) as { error?: { message?: unknown }; detail?: unknown }
+      if (j.error?.message !== undefined) msg = parseDetail(j.error.message)
+      else if (j.detail !== undefined) msg = parseDetail(j.detail)
+    } catch {
+      /* ignore */
+    }
+    throw new Error(msg)
+  }
+  const raw = await consumeSseChatStream(res, callbacks)
+  if (raw.outcome === 'sql_approval_required') {
+    throw new Error('Unexpected sql_approval_required on resume stream')
+  }
+  return { answer: raw.assembled }
 }

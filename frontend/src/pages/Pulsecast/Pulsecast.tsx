@@ -560,6 +560,49 @@ export function Pulsecast() {
         </div>
       </div>
 
+      <div className={`interrupt-overlay${app.sqlHitlOpen ? ' show' : ''}`}>
+        <div className="interrupt-modal sql-hitl-modal">
+          <h3>Approve follow-up SQL</h3>
+          <p>
+            The analyst suggested an extra query. Approve to run it, or decline to finish with the data
+            you already have.
+          </p>
+          {app.sqlHitlRationale ? (
+            <p className="sql-hitl-rationale" style={{ color: 'var(--text2)', fontSize: '0.9rem' }}>
+              {app.sqlHitlRationale}
+            </p>
+          ) : null}
+          <label className="section-label" style={{ marginTop: 8 }}>
+            Sub-question (editable)
+          </label>
+          <textarea
+            className="interrupt-input"
+            style={{ minHeight: 100, resize: 'vertical' }}
+            value={app.sqlHitlEdited}
+            onChange={(e) => app.setSqlHitlEdited(e.target.value)}
+            placeholder={app.sqlHitlProposed}
+          />
+          <div className="interrupt-actions">
+            <button
+              type="button"
+              className="btn-primary"
+              disabled={app.qaStreaming}
+              onClick={() => app.submitSqlHitl(true)}
+            >
+              Approve &amp; run SQL
+            </button>
+            <button
+              type="button"
+              className="btn-secondary"
+              disabled={app.qaStreaming}
+              onClick={() => app.submitSqlHitl(false)}
+            >
+              Decline
+            </button>
+          </div>
+        </div>
+      </div>
+
       <div className={`interrupt-overlay${app.interruptOpen ? ' show' : ''}`}>
         <div className="interrupt-modal">
           <h3>⚡ Interrupt Podcast</h3>

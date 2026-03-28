@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import type { Dispatch, SetStateAction } from 'react'
 import type { NavigateFunction } from 'react-router-dom'
 import {
   AGENTS,
@@ -8,7 +9,7 @@ import {
   TOPBAR_BY_SCREEN,
   TOTAL_MS,
 } from '../constants'
-import { streamPulsecastQa } from '../../../services/api/pulsecastQa'
+import { streamPulsecastQa, streamPulsecastResume } from '../../../services/api/pulsecastQa'
 import { colorToRgb, cumulativeMsBeforeSegment, fmt, segmentIndexAtElapsed } from '../utils'
 import { pathForScreen } from '../../../routes/paths'
 import type { AgentState, PodcastRole, QaMessage, Screen } from '../../../types'
@@ -30,6 +31,269 @@ const QA_INSIGHT_STYLE: Record<PodcastRole, { emoji: string; color: string }> = 
   CHALLENGER: { emoji: '⚖️', color: 'var(--challenger)' },
 }
 
+function makePulsecastStreamHandlers(
+  typingId: string,
+  setQaMessages: Dispatch<SetStateAction<QaMessage[]>>,
+) {
+  let summarizingMsgId: string | null = null
+  let typingBubbleCreated = false
+  const pushAnalystUpdate = (text: string, sql?: string) => {
+    const markdownText = sql ? `${text}\n\n\`\`\`sql\n${sql}\n\`\`\`` : text
+    setQaMessages((m) => [
+      ...m,
+      {
+        id: newId(),
+        kind: 'agent',
+        role: 'ANALYST',
+        emoji: QA_INSIGHT_STYLE.ANALYST.emoji,
+        color: QA_INSIGHT_STYLE.ANALYST.color,
+        text: markdownText,
+      },
+    ])
+  }
+  let activeTtsMsgId: string | null = null
+  let activeExecMsgId: string | null = null
+  let hostPlanMsgId: string | null = null
+  let hostPlanText = ''
+  let planMsgId: string | null = null
+  let planText = ''
+  let activeTtsLabel = ''
+  let activeTtsGenerating = ''
+  let activeTtsSql = ''
+  let activeExecLabel = ''
+  let activeExecGenerating = ''
+  let activeExecTable = ''
+  let summarizingText = ''
+  const upsertAnalystMessage = (id: string, text: string) => {
+    setQaMessages((m) => {
+      const exists = m.some((msg) => msg.id === id)
+      if (!exists) {
+        return [
+          ...m,
+          {
+            id,
+            kind: 'agent',
+            role: 'ANALYST',
+            emoji: QA_INSIGHT_STYLE.ANALYST.emoji,
+            color: QA_INSIGHT_STYLE.ANALYST.color,
+            text,
+          },
+        ]
+      }
+      return m.map((msg) => (msg.id === id ? { ...msg, text } : msg))
+    })
+  }
+  const upsertHostMessage = (id: string, text: string) => {
+    setQaMessages((m) => {
+      const exists = m.some((msg) => msg.id === id)
+      if (!exists) {
+        return [
+          ...m,
+          {
+            id,
+            kind: 'agent',
+            role: 'HOST',
+            emoji: QA_INSIGHT_STYLE.HOST.emoji,
+            color: QA_INSIGHT_STYLE.HOST.color,
+            text,
+          },
+        ]
+      }
+      return m.map((msg) => (msg.id === id ? { ...msg, text } : msg))
+    })
+  }
+  const onProgress = (event: StreamProgressEvent) => {
+    if (event.type === 'sql_approval_required' || event.type === 'sql_followup_declined') {
+      return
+    }
+    if (event.type === 'host_plan_started') {
+      hostPlanText = ''
+      const id = newId()
+      hostPlanMsgId = id
+      upsertHostMessage(id, '_Planning…_')
+      return
+    }
+    if (event.type === 'host_plan_chunk') {
+      if (!hostPlanMsgId) {
+        hostPlanMsgId = newId()
+      }
+      hostPlanText += event.chunk
+      upsertHostMessage(hostPlanMsgId, hostPlanText)
+      return
+    }
+    if (event.type === 'host_plan_done') {
+      return
+    }
+    if (event.type === 'planned_sub_questions_started') {
+      planText = ''
+      const id = newId()
+      planMsgId = id
+      upsertAnalystMessage(
+        id,
+        `To answer this, I will break it down into steps:\n\n_Planning…_`,
+      )
+      return
+    }
+    if (event.type === 'planned_sub_questions_chunk') {
+      if (!planMsgId) planMsgId = newId()
+      planText += event.chunk
+      upsertAnalystMessage(planMsgId, planText)
+      return
+    }
+    if (event.type === 'planned_sub_questions_done') {
+      return
+    }
+    if (event.type === 'sub_question_start') return
+    if (event.type === 'sub_question_done') {
+      return
+    }
+    if (event.type === 'tts_started') {
+      activeTtsLabel = ''
+      activeTtsGenerating = ''
+      activeTtsSql = ''
+      activeTtsMsgId = newId()
+      return
+    }
+    if (event.type === 'tts_label_chunk') {
+      if (!activeTtsMsgId) {
+        activeTtsMsgId = newId()
+      }
+      activeTtsLabel += event.chunk
+      upsertAnalystMessage(activeTtsMsgId, activeTtsLabel)
+      return
+    }
+    if (event.type === 'tts_generating_chunk') {
+      if (!activeTtsMsgId) {
+        activeTtsMsgId = newId()
+      }
+      activeTtsGenerating += event.chunk
+      upsertAnalystMessage(
+        activeTtsMsgId,
+        `${activeTtsLabel}\n\n${activeTtsGenerating}`,
+      )
+      return
+    }
+    if (event.type === 'tts_sql_chunk') {
+      if (!activeTtsMsgId) {
+        activeTtsMsgId = newId()
+      }
+      activeTtsSql += event.chunk
+      const header =
+        activeTtsLabel ||
+        `Text-to-SQL ${event.index}/${event.total}: ${event.sub_question}`
+      upsertAnalystMessage(
+        activeTtsMsgId,
+        `${header}\n\n\`\`\`sql\n${activeTtsSql}\n\`\`\``,
+      )
+      return
+    }
+    if (event.type === 'tts_done') {
+      return
+    }
+    if (event.type === 'execute_started') {
+      activeExecLabel = ''
+      activeExecGenerating = ''
+      activeExecTable = ''
+      activeExecMsgId = newId()
+      return
+    }
+    if (event.type === 'execute_label_chunk') {
+      if (!activeExecMsgId) {
+        activeExecMsgId = newId()
+      }
+      activeExecLabel += event.chunk
+      upsertAnalystMessage(activeExecMsgId, activeExecLabel)
+      return
+    }
+    if (event.type === 'execute_generating_chunk') {
+      if (!activeExecMsgId) {
+        activeExecMsgId = newId()
+      }
+      activeExecGenerating += event.chunk
+      upsertAnalystMessage(
+        activeExecMsgId,
+        `${activeExecLabel}\n\n${activeExecGenerating}`,
+      )
+      return
+    }
+    if (event.type === 'execute_table_chunk') {
+      if (!activeExecMsgId) {
+        activeExecMsgId = newId()
+      }
+      activeExecTable += event.chunk
+      upsertAnalystMessage(
+        activeExecMsgId,
+        `Result ${event.index}/${event.total}: ${event.sub_question}\n\n${activeExecTable}`,
+      )
+      return
+    }
+    if (event.type === 'execute_done') {
+      if (activeExecMsgId && activeExecTable) {
+        upsertAnalystMessage(
+          activeExecMsgId,
+          `Result ${event.index}/${event.total}: ${event.sub_question}\n\n${activeExecTable}`,
+        )
+      }
+      return
+    }
+    if (event.type === 'sub_question_retry') {
+      pushAnalystUpdate(`Retrying ${event.index}/${event.total}: ${event.reason}`)
+    }
+    if (event.type === 'summarizing_started') {
+      summarizingText = ''
+      summarizingMsgId = newId()
+      upsertHostMessage(summarizingMsgId, '_Summarizing…_')
+      return
+    }
+    if (event.type === 'summarizing_chunk') {
+      if (!summarizingMsgId) {
+        summarizingMsgId = newId()
+      }
+      summarizingText += event.chunk
+      upsertHostMessage(summarizingMsgId, summarizingText)
+      return
+    }
+    if (event.type === 'summarizing_done') {
+      return
+    }
+  }
+  const onDelta = (delta: string) => {
+    const streamMsgId = summarizingMsgId ?? typingId
+    if (!typingBubbleCreated) {
+      typingBubbleCreated = true
+      setQaMessages((m) => {
+        const exists = m.some((msg) => msg.id === streamMsgId)
+        if (!exists) {
+          return [
+            ...m,
+            {
+              id: streamMsgId,
+              kind: 'agent',
+              role: 'HOST',
+              emoji: QA_INSIGHT_STYLE.HOST.emoji,
+              color: QA_INSIGHT_STYLE.HOST.color,
+              text: delta,
+            },
+          ]
+        }
+        return m.map((msg) => (msg.id === streamMsgId ? { ...msg, text: delta } : msg))
+      })
+    } else {
+      setQaMessages((m) =>
+        m.map((msg) =>
+          msg.id === streamMsgId ? { ...msg, text: `${msg.text}${delta}` } : msg,
+        ),
+      )
+    }
+  }
+  return {
+    onProgress,
+    onDelta,
+    getSummarizingMsgId: () => summarizingMsgId,
+    getTypingBubbleCreated: () => typingBubbleCreated,
+  }
+}
+
 export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
   const [isPlaying, setIsPlaying] = useState(false)
   const [totalElapsed, setTotalElapsed] = useState(0)
@@ -47,6 +311,12 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
 
   const [interruptOpen, setInterruptOpen] = useState(false)
   const [interruptDraft, setInterruptDraft] = useState('')
+
+  const [sqlHitlOpen, setSqlHitlOpen] = useState(false)
+  const [sqlHitlToken, setSqlHitlToken] = useState<string | null>(null)
+  const [sqlHitlProposed, setSqlHitlProposed] = useState('')
+  const [sqlHitlEdited, setSqlHitlEdited] = useState('')
+  const [sqlHitlRationale, setSqlHitlRationale] = useState<string | null>(null)
 
   const [toast, setToast] = useState<{ message: string; visible: boolean }>({
     message: '',
@@ -231,226 +501,9 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
       setAgentStates(AGENTS.map(() => 'idle'))
       setQaStreaming(true)
       const typingId = newId()
-      let summarizingMsgId: string | null = null
-      let typingBubbleCreated = false
+      let stream: ReturnType<typeof makePulsecastStreamHandlers> | null = null
       try {
-        const pushAnalystUpdate = (text: string, sql?: string) => {
-          const markdownText = sql ? `${text}\n\n\`\`\`sql\n${sql}\n\`\`\`` : text
-          setQaMessages((m) => [
-            ...m,
-            {
-              id: newId(),
-              kind: 'agent',
-              role: 'ANALYST',
-              emoji: QA_INSIGHT_STYLE.ANALYST.emoji,
-              color: QA_INSIGHT_STYLE.ANALYST.color,
-              text: markdownText,
-            },
-          ])
-        }
-        let activeTtsMsgId: string | null = null
-        let activeExecMsgId: string | null = null
-        let hostPlanMsgId: string | null = null
-        let hostPlanText = ''
-        let planMsgId: string | null = null
-        let planText = ''
-        let activeTtsLabel = ''
-        let activeTtsGenerating = ''
-        let activeTtsSql = ''
-        let activeExecLabel = ''
-        let activeExecGenerating = ''
-        let activeExecTable = ''
-        let summarizingText = ''
-        const upsertAnalystMessage = (id: string, text: string) => {
-          setQaMessages((m) => {
-            const exists = m.some((msg) => msg.id === id)
-            if (!exists) {
-              return [
-                ...m,
-                {
-                  id,
-                  kind: 'agent',
-                  role: 'ANALYST',
-                  emoji: QA_INSIGHT_STYLE.ANALYST.emoji,
-                  color: QA_INSIGHT_STYLE.ANALYST.color,
-                  text,
-                },
-              ]
-            }
-            return m.map((msg) => (msg.id === id ? { ...msg, text } : msg))
-          })
-        }
-        const upsertHostMessage = (id: string, text: string) => {
-          setQaMessages((m) => {
-            const exists = m.some((msg) => msg.id === id)
-            if (!exists) {
-              return [
-                ...m,
-                {
-                  id,
-                  kind: 'agent',
-                  role: 'HOST',
-                  emoji: QA_INSIGHT_STYLE.HOST.emoji,
-                  color: QA_INSIGHT_STYLE.HOST.color,
-                  text,
-                },
-              ]
-            }
-            return m.map((msg) => (msg.id === id ? { ...msg, text } : msg))
-          })
-        }
-        const onProgress = (event: StreamProgressEvent) => {
-          if (event.type === 'host_plan_started') {
-            hostPlanText = ''
-            const id = newId()
-            hostPlanMsgId = id
-            upsertHostMessage(id, '_Planning…_')
-            return
-          }
-          if (event.type === 'host_plan_chunk') {
-            if (!hostPlanMsgId) {
-              hostPlanMsgId = newId()
-            }
-            hostPlanText += event.chunk
-            upsertHostMessage(hostPlanMsgId, hostPlanText)
-            return
-          }
-          if (event.type === 'host_plan_done') {
-            return
-          }
-          if (event.type === 'planned_sub_questions_started') {
-            planText = ''
-            const id = newId()
-            planMsgId = id
-            upsertAnalystMessage(
-              id,
-              `To answer this, I will break it down into steps:\n\n_Planning…_`,
-            )
-            return
-          }
-          if (event.type === 'planned_sub_questions_chunk') {
-            if (!planMsgId) planMsgId = newId()
-            planText += event.chunk
-            upsertAnalystMessage(planMsgId, planText)
-            return
-          }
-          if (event.type === 'planned_sub_questions_done') {
-            return
-          }
-          if (event.type === 'sub_question_start') return
-          if (event.type === 'sub_question_done') {
-            return
-          }
-          if (event.type === 'tts_started') {
-            activeTtsLabel = ''
-            activeTtsGenerating = ''
-            activeTtsSql = ''
-            activeTtsMsgId = newId()
-            return
-          }
-          if (event.type === 'tts_label_chunk') {
-            if (!activeTtsMsgId) {
-              activeTtsMsgId = newId()
-            }
-            activeTtsLabel += event.chunk
-            upsertAnalystMessage(activeTtsMsgId, activeTtsLabel)
-            return
-          }
-          if (event.type === 'tts_generating_chunk') {
-            if (!activeTtsMsgId) {
-              activeTtsMsgId = newId()
-            }
-            activeTtsGenerating += event.chunk
-            upsertAnalystMessage(
-              activeTtsMsgId,
-              `${activeTtsLabel}\n\n${activeTtsGenerating}`,
-            )
-            return
-          }
-          if (event.type === 'tts_sql_chunk') {
-            if (!activeTtsMsgId) {
-              activeTtsMsgId = newId()
-            }
-            activeTtsSql += event.chunk
-            const header =
-              activeTtsLabel ||
-              `Text-to-SQL ${event.index}/${event.total}: ${event.sub_question}`
-            upsertAnalystMessage(
-              activeTtsMsgId,
-              `${header}\n\n\`\`\`sql\n${activeTtsSql}\n\`\`\``,
-            )
-            return
-          }
-          if (event.type === 'tts_done') {
-            return
-          }
-          if (event.type === 'execute_started') {
-            activeExecLabel = ''
-            activeExecGenerating = ''
-            activeExecTable = ''
-            activeExecMsgId = newId()
-            return
-          }
-          if (event.type === 'execute_label_chunk') {
-            if (!activeExecMsgId) {
-              activeExecMsgId = newId()
-            }
-            activeExecLabel += event.chunk
-            upsertAnalystMessage(activeExecMsgId, activeExecLabel)
-            return
-          }
-          if (event.type === 'execute_generating_chunk') {
-            if (!activeExecMsgId) {
-              activeExecMsgId = newId()
-            }
-            activeExecGenerating += event.chunk
-            upsertAnalystMessage(
-              activeExecMsgId,
-              `${activeExecLabel}\n\n${activeExecGenerating}`,
-            )
-            return
-          }
-          if (event.type === 'execute_table_chunk') {
-            if (!activeExecMsgId) {
-              activeExecMsgId = newId()
-            }
-            activeExecTable += event.chunk
-            upsertAnalystMessage(
-              activeExecMsgId,
-              `Result ${event.index}/${event.total}: ${event.sub_question}\n\n${activeExecTable}`,
-            )
-            return
-          }
-          if (event.type === 'execute_done') {
-            if (activeExecMsgId && activeExecTable) {
-              upsertAnalystMessage(
-                activeExecMsgId,
-                `Result ${event.index}/${event.total}: ${event.sub_question}\n\n${activeExecTable}`,
-              )
-            }
-            return
-          }
-          if (event.type === 'sub_question_retry') {
-            pushAnalystUpdate(`Retrying ${event.index}/${event.total}: ${event.reason}`)
-          }
-          if (event.type === 'summarizing_started') {
-            summarizingText = ''
-            summarizingMsgId = newId()
-            upsertHostMessage(summarizingMsgId, '_Summarizing…_')
-            return
-          }
-          if (event.type === 'summarizing_chunk') {
-            if (!summarizingMsgId) {
-              summarizingMsgId = newId()
-            }
-            summarizingText += event.chunk
-            upsertHostMessage(summarizingMsgId, summarizingText)
-            return
-          }
-          if (event.type === 'summarizing_done') {
-            return
-          }
-        }
+        stream = makePulsecastStreamHandlers(typingId, setQaMessages)
         const conversation = [
           ...qaMessages
             .filter((m) => m.kind === 'user' && m.role === 'YOU' && typeof m.text === 'string')
@@ -464,42 +517,40 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
             messages: conversation,
           },
           {
-            onDelta: (delta) => {
-              const streamMsgId = summarizingMsgId ?? typingId
-              if (!typingBubbleCreated) {
-                typingBubbleCreated = true
-                setQaMessages((m) => {
-                  const exists = m.some((msg) => msg.id === streamMsgId)
-                  if (exists) {
-                    return m.map((msg) =>
-                      msg.id === streamMsgId ? { ...msg, text: delta } : msg,
-                    )
-                  }
-                  return [
-                    ...m,
-                    {
-                      id: streamMsgId,
-                      kind: 'agent',
-                      role: 'HOST',
-                      emoji: QA_INSIGHT_STYLE.HOST.emoji,
-                      color: QA_INSIGHT_STYLE.HOST.color,
-                      text: delta,
-                    },
-                  ]
-                })
-              } else {
-                setQaMessages((m) =>
-                  m.map((msg) =>
-                    msg.id === streamMsgId ? { ...msg, text: `${msg.text}${delta}` } : msg,
-                  ),
-                )
-              }
-            },
-            onProgress,
+            onDelta: stream.onDelta,
+            onProgress: stream.onProgress,
           },
         )
         setAgentStates(AGENTS.map(() => 'idle'))
-        if (!typingBubbleCreated) {
+        if (result.kind === 'sql_approval_required') {
+          const sid = stream.getSummarizingMsgId()
+          const hint =
+            '_The analyst suggests an extra query._ Use the dialog to **approve** (run SQL) or **decline** (answer with current data only).'
+          if (sid) {
+            setQaMessages((m) =>
+              m.map((msg) => (msg.id === sid ? { ...msg, text: hint } : msg)),
+            )
+          } else {
+            setQaMessages((m) => [
+              ...m,
+              {
+                id: newId(),
+                kind: 'agent',
+                role: 'HOST',
+                emoji: QA_INSIGHT_STYLE.HOST.emoji,
+                color: QA_INSIGHT_STYLE.HOST.color,
+                text: hint,
+              },
+            ])
+          }
+          setSqlHitlToken(result.resume_token)
+          setSqlHitlEdited(result.proposed_sub_question)
+          setSqlHitlProposed(result.proposed_sub_question)
+          setSqlHitlRationale(result.rationale)
+          setSqlHitlOpen(true)
+          return
+        }
+        if (!stream.getTypingBubbleCreated()) {
           setQaMessages((m) => [
             ...m,
             {
@@ -522,8 +573,8 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
         window.setTimeout(() => showToast('▶ Podcast resuming from live point…'), 1000)
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e)
-        if (typingBubbleCreated) {
-          const streamMsgId = summarizingMsgId ?? typingId
+        if (stream?.getTypingBubbleCreated()) {
+          const streamMsgId = stream.getSummarizingMsgId() ?? typingId
           setQaMessages((m) => m.filter((msgItem) => msgItem.id !== streamMsgId))
         }
         setAgentStates(AGENTS.map(() => 'idle'))
@@ -543,6 +594,81 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
       }
     },
     [qaInput, qaMessages, showToast],
+  )
+
+  const submitSqlHitl = useCallback(
+    async (approved: boolean) => {
+      const token = sqlHitlToken
+      if (!token) return
+      setSqlHitlOpen(false)
+      setQaStreaming(true)
+      const typingId = newId()
+      let stream: ReturnType<typeof makePulsecastStreamHandlers> | null = null
+      try {
+        stream = makePulsecastStreamHandlers(typingId, setQaMessages)
+        const result = await streamPulsecastResume(
+          {
+            resume_token: token,
+            approved,
+            edited_question:
+              approved && sqlHitlEdited.trim() ? sqlHitlEdited.trim() : undefined,
+            session_id: qaSessionRef.current ?? undefined,
+          },
+          {
+            onDelta: stream.onDelta,
+            onProgress: stream.onProgress,
+          },
+        )
+        setAgentStates(AGENTS.map(() => 'idle'))
+        setSqlHitlToken(null)
+        setSqlHitlProposed('')
+        setSqlHitlEdited('')
+        setSqlHitlRationale(null)
+        if (!stream.getTypingBubbleCreated()) {
+          setQaMessages((m) => [
+            ...m,
+            {
+              id: newId(),
+              kind: 'agent',
+              role: 'HOST',
+              emoji: QA_INSIGHT_STYLE.HOST.emoji,
+              color: QA_INSIGHT_STYLE.HOST.color,
+              text: result.answer,
+            },
+          ])
+        }
+        const synth = window.speechSynthesis
+        if (synth) {
+          synth.cancel()
+          const u = new SpeechSynthesisUtterance(result.answer)
+          u.rate = 0.95
+          synth.speak(u)
+        }
+        window.setTimeout(() => showToast('▶ Podcast resuming from live point…'), 1000)
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        if (stream?.getTypingBubbleCreated()) {
+          const streamMsgId = stream.getSummarizingMsgId() ?? typingId
+          setQaMessages((m) => m.filter((msgItem) => msgItem.id !== streamMsgId))
+        }
+        setSqlHitlToken(null)
+        setAgentStates(AGENTS.map(() => 'idle'))
+        setQaMessages((m) => [
+          ...m,
+          {
+            id: newId(),
+            kind: 'agent',
+            role: 'SYSTEM',
+            emoji: '⚠️',
+            color: 'var(--red)',
+            text: msg,
+          },
+        ])
+      } finally {
+        setQaStreaming(false)
+      }
+    },
+    [showToast, sqlHitlEdited, sqlHitlToken],
   )
 
   const submitInterrupt = useCallback(() => {
@@ -642,6 +768,13 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
     interruptDraft,
     setInterruptDraft,
     submitInterrupt,
+    sqlHitlOpen,
+    setSqlHitlOpen,
+    sqlHitlProposed,
+    sqlHitlEdited,
+    setSqlHitlEdited,
+    sqlHitlRationale,
+    submitSqlHitl,
     qaInput,
     setQaInput,
     sendQA,

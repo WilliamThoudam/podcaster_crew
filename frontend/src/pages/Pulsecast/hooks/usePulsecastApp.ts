@@ -31,10 +31,31 @@ const QA_INSIGHT_STYLE: Record<PodcastRole, { emoji: string; color: string }> = 
   CHALLENGER: { emoji: '⚖️', color: 'var(--challenger)' },
 }
 
+/** Sidebar `AGENTS` row index matches PodcastRole order. */
+const ROLE_TO_AGENT_INDEX: Record<PodcastRole, number> = {
+  HOST: 0,
+  ANALYST: 1,
+  MARKETING: 2,
+  FINANCE: 3,
+  CHALLENGER: 4,
+}
+
+function agentStatesForThinkingRole(role: PodcastRole | null): AgentState[] {
+  return AGENTS.map((_, i) =>
+    role != null && ROLE_TO_AGENT_INDEX[role] === i ? 'thinking' : 'idle',
+  )
+}
+
+type SetThinkingRole = (role: PodcastRole | null) => void
+
 function makePulsecastStreamHandlers(
   typingId: string,
   setQaMessages: Dispatch<SetStateAction<QaMessage[]>>,
+  setThinkingRole: SetThinkingRole,
 ) {
+  const markThinking = (role: PodcastRole | null) => {
+    setThinkingRole(role)
+  }
   let summarizingMsgId: string | null = null
   let typingBubbleCreated = false
   const pushAnalystUpdate = (text: string, sql?: string) => {
@@ -133,9 +154,11 @@ function makePulsecastStreamHandlers(
   }
   const onProgress = (event: StreamProgressEvent) => {
     if (event.type === 'sql_approval_required' || event.type === 'sql_followup_declined') {
+      markThinking(null)
       return
     }
     if (event.type === 'host_plan_started') {
+      markThinking('HOST')
       hostPlanText = ''
       const id = newId()
       hostPlanMsgId = id
@@ -143,6 +166,7 @@ function makePulsecastStreamHandlers(
       return
     }
     if (event.type === 'host_plan_chunk') {
+      markThinking('HOST')
       if (!hostPlanMsgId) {
         hostPlanMsgId = newId()
       }
@@ -151,9 +175,11 @@ function makePulsecastStreamHandlers(
       return
     }
     if (event.type === 'host_plan_done') {
+      markThinking(null)
       return
     }
     if (event.type === 'planned_sub_questions_started') {
+      markThinking('ANALYST')
       planText = ''
       const id = newId()
       planMsgId = id
@@ -164,19 +190,26 @@ function makePulsecastStreamHandlers(
       return
     }
     if (event.type === 'planned_sub_questions_chunk') {
+      markThinking('ANALYST')
       if (!planMsgId) planMsgId = newId()
       planText += event.chunk
       upsertAnalystMessage(planMsgId, planText)
       return
     }
     if (event.type === 'planned_sub_questions_done') {
+      markThinking(null)
       return
     }
-    if (event.type === 'sub_question_start') return
+    if (event.type === 'sub_question_start') {
+      markThinking('ANALYST')
+      return
+    }
     if (event.type === 'sub_question_done') {
+      markThinking(null)
       return
     }
     if (event.type === 'tts_started') {
+      markThinking('ANALYST')
       activeTtsLabel = ''
       activeTtsGenerating = ''
       activeTtsSql = ''
@@ -184,6 +217,7 @@ function makePulsecastStreamHandlers(
       return
     }
     if (event.type === 'tts_label_chunk') {
+      markThinking('ANALYST')
       if (!activeTtsMsgId) {
         activeTtsMsgId = newId()
       }
@@ -192,6 +226,7 @@ function makePulsecastStreamHandlers(
       return
     }
     if (event.type === 'tts_generating_chunk') {
+      markThinking('ANALYST')
       if (!activeTtsMsgId) {
         activeTtsMsgId = newId()
       }
@@ -203,6 +238,7 @@ function makePulsecastStreamHandlers(
       return
     }
     if (event.type === 'tts_sql_chunk') {
+      markThinking('ANALYST')
       if (!activeTtsMsgId) {
         activeTtsMsgId = newId()
       }
@@ -217,9 +253,11 @@ function makePulsecastStreamHandlers(
       return
     }
     if (event.type === 'tts_done') {
+      markThinking(null)
       return
     }
     if (event.type === 'execute_started') {
+      markThinking('ANALYST')
       activeExecLabel = ''
       activeExecGenerating = ''
       activeExecTable = ''
@@ -227,6 +265,7 @@ function makePulsecastStreamHandlers(
       return
     }
     if (event.type === 'execute_label_chunk') {
+      markThinking('ANALYST')
       if (!activeExecMsgId) {
         activeExecMsgId = newId()
       }
@@ -235,6 +274,7 @@ function makePulsecastStreamHandlers(
       return
     }
     if (event.type === 'execute_generating_chunk') {
+      markThinking('ANALYST')
       if (!activeExecMsgId) {
         activeExecMsgId = newId()
       }
@@ -246,6 +286,7 @@ function makePulsecastStreamHandlers(
       return
     }
     if (event.type === 'execute_table_chunk') {
+      markThinking('ANALYST')
       if (!activeExecMsgId) {
         activeExecMsgId = newId()
       }
@@ -257,6 +298,7 @@ function makePulsecastStreamHandlers(
       return
     }
     if (event.type === 'execute_done') {
+      markThinking(null)
       if (activeExecMsgId && activeExecTable) {
         upsertAnalystMessage(
           activeExecMsgId,
@@ -266,15 +308,18 @@ function makePulsecastStreamHandlers(
       return
     }
     if (event.type === 'sub_question_retry') {
+      markThinking('ANALYST')
       pushAnalystUpdate(`Retrying ${event.index}/${event.total}: ${event.reason}`)
     }
     if (event.type === 'summarizing_started') {
+      markThinking('HOST')
       summarizingText = ''
       summarizingMsgId = newId()
       upsertHostMessage(summarizingMsgId, '_Summarizing…_')
       return
     }
     if (event.type === 'summarizing_chunk') {
+      markThinking('HOST')
       if (!summarizingMsgId) {
         summarizingMsgId = newId()
       }
@@ -283,13 +328,16 @@ function makePulsecastStreamHandlers(
       return
     }
     if (event.type === 'summarizing_done') {
+      markThinking(null)
       return
     }
     if (event.type === 'discussion_round_started') {
+      markThinking(null)
       pushAnalystUpdate(`_Discussion — round ${event.round}_`)
       return
     }
     if (event.type === 'discussion_analyst_started') {
+      markThinking('ANALYST')
       discussionAnalystText = ''
       discussionAnalystMsgId = newId()
       upsertAnalystMessage(
@@ -299,15 +347,18 @@ function makePulsecastStreamHandlers(
       return
     }
     if (event.type === 'discussion_analyst_chunk') {
+      markThinking('ANALYST')
       if (!discussionAnalystMsgId) discussionAnalystMsgId = newId()
       discussionAnalystText += event.chunk
       upsertAnalystMessage(discussionAnalystMsgId, discussionAnalystText)
       return
     }
     if (event.type === 'discussion_analyst_done') {
+      markThinking(null)
       return
     }
     if (event.type === 'discussion_turn_started') {
+      markThinking(event.role)
       discussionTurnText = ''
       discussionTurnMsgId = newId()
       discussionTurnRole = event.role
@@ -319,6 +370,7 @@ function makePulsecastStreamHandlers(
       return
     }
     if (event.type === 'discussion_turn_chunk') {
+      markThinking(event.role)
       if (!discussionTurnMsgId || discussionTurnRole !== event.role) {
         discussionTurnMsgId = newId()
         discussionTurnRole = event.role
@@ -328,6 +380,7 @@ function makePulsecastStreamHandlers(
       return
     }
     if (event.type === 'discussion_turn_done') {
+      markThinking(null)
       return
     }
     if (event.type === 'discussion_moderator') {
@@ -337,6 +390,7 @@ function makePulsecastStreamHandlers(
     }
   }
   const onDelta = (delta: string) => {
+    markThinking('HOST')
     const streamMsgId = summarizingMsgId ?? typingId
     if (!typingBubbleCreated) {
       typingBubbleCreated = true
@@ -387,6 +441,10 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
   const [qaStreaming, setQaStreaming] = useState(false)
 
   const [agentStates, setAgentStates] = useState<AgentState[]>(() => AGENTS.map(() => 'idle'))
+
+  const setThinkingRole = useCallback((role: PodcastRole | null) => {
+    setAgentStates(agentStatesForThinkingRole(role))
+  }, [])
 
   const [interruptOpen, setInterruptOpen] = useState(false)
   const [interruptDraft, setInterruptDraft] = useState('')
@@ -582,7 +640,7 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
       const typingId = newId()
       let stream: ReturnType<typeof makePulsecastStreamHandlers> | null = null
       try {
-        stream = makePulsecastStreamHandlers(typingId, setQaMessages)
+        stream = makePulsecastStreamHandlers(typingId, setQaMessages, setThinkingRole)
         const conversation = [
           ...qaMessages
             .filter((m) => m.kind === 'user' && m.role === 'YOU' && typeof m.text === 'string')
@@ -672,7 +730,7 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
         setQaStreaming(false)
       }
     },
-    [qaInput, qaMessages, showToast],
+    [qaInput, qaMessages, setThinkingRole, showToast],
   )
 
   const submitSqlHitl = useCallback(
@@ -681,10 +739,11 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
       if (!token) return
       setSqlHitlOpen(false)
       setQaStreaming(true)
+      setAgentStates(AGENTS.map(() => 'idle'))
       const typingId = newId()
       let stream: ReturnType<typeof makePulsecastStreamHandlers> | null = null
       try {
-        stream = makePulsecastStreamHandlers(typingId, setQaMessages)
+        stream = makePulsecastStreamHandlers(typingId, setQaMessages, setThinkingRole)
         const result = await streamPulsecastResume(
           {
             resume_token: token,
@@ -747,7 +806,7 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
         setQaStreaming(false)
       }
     },
-    [showToast, sqlHitlEdited, sqlHitlToken],
+    [setThinkingRole, showToast, sqlHitlEdited, sqlHitlToken],
   )
 
   const submitInterrupt = useCallback(() => {

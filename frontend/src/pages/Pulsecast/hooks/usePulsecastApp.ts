@@ -249,9 +249,12 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
         let activeExecMsgId: string | null = null
         let planMsgId: string | null = null
         let planText = ''
+        let activeTtsLabel = ''
+        let activeTtsGenerating = ''
         let activeTtsSql = ''
+        let activeExecLabel = ''
+        let activeExecGenerating = ''
         let activeExecTable = ''
-        let activeExecStatus = ''
         const upsertAnalystMessage = (id: string, text: string) => {
           setQaMessages((m) => {
             const exists = m.some((msg) => msg.id === id)
@@ -293,10 +296,29 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
             return
           }
           if (event.type === 'tts_started') {
+            activeTtsLabel = ''
+            activeTtsGenerating = ''
             activeTtsSql = ''
-            const id = newId()
-            activeTtsMsgId = id
-            upsertAnalystMessage(id, `Text-to-SQL ${event.index}/${event.total}: ${event.sub_question}\n\n_Generating…_`)
+            activeTtsMsgId = newId()
+            return
+          }
+          if (event.type === 'tts_label_chunk') {
+            if (!activeTtsMsgId) {
+              activeTtsMsgId = newId()
+            }
+            activeTtsLabel += event.chunk
+            upsertAnalystMessage(activeTtsMsgId, activeTtsLabel)
+            return
+          }
+          if (event.type === 'tts_generating_chunk') {
+            if (!activeTtsMsgId) {
+              activeTtsMsgId = newId()
+            }
+            activeTtsGenerating += event.chunk
+            upsertAnalystMessage(
+              activeTtsMsgId,
+              `${activeTtsLabel}\n\n${activeTtsGenerating}`,
+            )
             return
           }
           if (event.type === 'tts_sql_chunk') {
@@ -304,9 +326,12 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
               activeTtsMsgId = newId()
             }
             activeTtsSql += event.chunk
+            const header =
+              activeTtsLabel ||
+              `Text-to-SQL ${event.index}/${event.total}: ${event.sub_question}`
             upsertAnalystMessage(
               activeTtsMsgId,
-              `Text-to-SQL ${event.index}/${event.total}: ${event.sub_question}\n\n\`\`\`sql\n${activeTtsSql}\n\`\`\``,
+              `${header}\n\n\`\`\`sql\n${activeTtsSql}\n\`\`\``,
             )
             return
           }
@@ -314,21 +339,28 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
             return
           }
           if (event.type === 'execute_started') {
+            activeExecLabel = ''
+            activeExecGenerating = ''
             activeExecTable = ''
-            activeExecStatus = ''
-            const id = newId()
-            activeExecMsgId = id
-            upsertAnalystMessage(id, `Executing ${event.index}/${event.total}: ${event.sub_question}\n\n`)
+            activeExecMsgId = newId()
             return
           }
-          if (event.type === 'execute_status_chunk') {
+          if (event.type === 'execute_label_chunk') {
             if (!activeExecMsgId) {
               activeExecMsgId = newId()
             }
-            activeExecStatus += event.chunk
+            activeExecLabel += event.chunk
+            upsertAnalystMessage(activeExecMsgId, activeExecLabel)
+            return
+          }
+          if (event.type === 'execute_generating_chunk') {
+            if (!activeExecMsgId) {
+              activeExecMsgId = newId()
+            }
+            activeExecGenerating += event.chunk
             upsertAnalystMessage(
               activeExecMsgId,
-              `Executing ${event.index}/${event.total}: ${event.sub_question}\n\n${activeExecStatus}`,
+              `${activeExecLabel}\n\n${activeExecGenerating}`,
             )
             return
           }

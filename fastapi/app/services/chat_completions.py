@@ -227,6 +227,19 @@ async def build_completion_payload(
                 event_type="tts_label_chunk",
                 delay_s=0.04,
             )
+            # After the full label, stream "Generating…" on the next line (separate phase)
+            await _emit_text_chunks(
+                on_progress=on_progress,
+                base_event={
+                    "index": idx + 1,
+                    "total": len(analyst_plan.sub_questions),
+                    "sub_question": sub_q,
+                },
+                text="Generating…",
+                chunk_size=1,
+                event_type="tts_generating_chunk",
+                delay_s=0.045,
+            )
             tts = await generate_sql(
                 settings=settings,
                 question=sub_q,
@@ -339,7 +352,7 @@ async def build_completion_payload(
                     "sub_question": sub_q,
                 },
             )
-            # Stream the "Result N/total: <sub_question>" label chunk by chunk
+            # Stream "Executing N/total: <sub_question>" first, then "Executing…" on the next line
             await _emit_text_chunks(
                 on_progress=on_progress,
                 base_event={
@@ -347,7 +360,7 @@ async def build_completion_payload(
                     "total": len(analyst_plan.sub_questions),
                     "sub_question": sub_q,
                 },
-                text=f"Result {idx + 1}/{len(analyst_plan.sub_questions)}: {sub_q}",
+                text=f"Executing {idx + 1}/{len(analyst_plan.sub_questions)}: {sub_q}",
                 chunk_size=2,
                 event_type="execute_label_chunk",
                 delay_s=0.04,
@@ -360,9 +373,9 @@ async def build_completion_payload(
                     "sub_question": sub_q,
                 },
                 text="Executing…",
-                chunk_size=2,
-                event_type="execute_status_chunk",
-                delay_s=0.06,
+                chunk_size=1,
+                event_type="execute_generating_chunk",
+                delay_s=0.045,
             )
             exe = await execute_sql_client(
                 settings=settings,

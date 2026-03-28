@@ -102,10 +102,13 @@ export type StreamProgressEvent =
   | { type: 'sub_question_start'; index: number; total: number; sub_question: string }
   | { type: 'sub_question_done'; index: number; total: number; sub_question: string; row_count?: number | null }
   | { type: 'tts_started'; index: number; total: number; sub_question: string }
+  | { type: 'tts_label_chunk'; index: number; total: number; sub_question: string; chunk: string }
+  | { type: 'tts_generating_chunk'; index: number; total: number; sub_question: string; chunk: string }
   | { type: 'tts_sql_chunk'; index: number; total: number; sub_question: string; chunk: string }
   | { type: 'tts_done'; index: number; total: number; sub_question: string }
   | { type: 'execute_started'; index: number; total: number; sub_question: string }
-  | { type: 'execute_status_chunk'; index: number; total: number; sub_question: string; chunk: string }
+  | { type: 'execute_label_chunk'; index: number; total: number; sub_question: string; chunk: string }
+  | { type: 'execute_generating_chunk'; index: number; total: number; sub_question: string; chunk: string }
   | { type: 'execute_table_chunk'; index: number; total: number; sub_question: string; chunk: string }
   | { type: 'execute_done'; index: number; total: number; sub_question: string; row_count?: number | null }
   | {

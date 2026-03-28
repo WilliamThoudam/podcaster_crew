@@ -128,6 +128,18 @@ function makePulsecastStreamHandlers(
       return m.map((msg) => (msg.id === id ? { ...msg, text } : msg))
     })
   }
+
+  /** Keep summarizing + streamed final HOST answer below internal discussion bubbles. */
+  const pinHostDraftAtBottom = () => {
+    const id = summarizingMsgId
+    if (!id) return
+    setQaMessages((m) => {
+      const i = m.findIndex((msg) => msg.id === id)
+      if (i === -1 || i === m.length - 1) return m
+      const row = m[i]!
+      return [...m.slice(0, i), ...m.slice(i + 1), row]
+    })
+  }
   const upsertRoleMessage = (
     role: 'MARKETING' | 'FINANCE' | 'CHALLENGER',
     id: string,
@@ -334,6 +346,7 @@ function makePulsecastStreamHandlers(
     if (event.type === 'discussion_round_started') {
       markThinking(null)
       pushAnalystUpdate(`_Discussion — round ${event.round}_`)
+      pinHostDraftAtBottom()
       return
     }
     if (event.type === 'discussion_analyst_started') {
@@ -344,13 +357,16 @@ function makePulsecastStreamHandlers(
         discussionAnalystMsgId,
         '_Analyst (internal discussion)…_',
       )
+      pinHostDraftAtBottom()
       return
     }
     if (event.type === 'discussion_analyst_chunk') {
       markThinking('ANALYST')
+      const createdId = !discussionAnalystMsgId
       if (!discussionAnalystMsgId) discussionAnalystMsgId = newId()
       discussionAnalystText += event.chunk
       upsertAnalystMessage(discussionAnalystMsgId, discussionAnalystText)
+      if (createdId) pinHostDraftAtBottom()
       return
     }
     if (event.type === 'discussion_analyst_done') {
@@ -367,16 +383,20 @@ function makePulsecastStreamHandlers(
         discussionTurnMsgId,
         `_Round ${event.round} · ${event.role}…_`,
       )
+      pinHostDraftAtBottom()
       return
     }
     if (event.type === 'discussion_turn_chunk') {
       markThinking(event.role)
-      if (!discussionTurnMsgId || discussionTurnRole !== event.role) {
+      const needNewTurn = !discussionTurnMsgId || discussionTurnRole !== event.role
+      if (needNewTurn) {
         discussionTurnMsgId = newId()
         discussionTurnRole = event.role
       }
+      const turnRowId = discussionTurnMsgId as string
       discussionTurnText += event.chunk
-      upsertRoleMessage(event.role, discussionTurnMsgId, discussionTurnText)
+      upsertRoleMessage(event.role, turnRowId, discussionTurnText)
+      if (needNewTurn) pinHostDraftAtBottom()
       return
     }
     if (event.type === 'discussion_turn_done') {
@@ -386,12 +406,14 @@ function makePulsecastStreamHandlers(
     if (event.type === 'discussion_moderator') {
       const verdict = event.continue_discussion ? 'Continue' : 'Stop'
       pushAnalystUpdate(`_Moderator:_ **${verdict}** — ${event.reason}`)
+      pinHostDraftAtBottom()
       return
     }
   }
   const onDelta = (delta: string) => {
     markThinking('HOST')
     const streamMsgId = summarizingMsgId ?? typingId
+    if (!typingBubbleCreated && summarizingMsgId) pinHostDraftAtBottom()
     if (!typingBubbleCreated) {
       typingBubbleCreated = true
       setQaMessages((m) => {

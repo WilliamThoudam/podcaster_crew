@@ -447,18 +447,8 @@ async def build_completion_payload(
             detail="No successful sub-question results were produced",
         )
 
-    # 3) Deterministic summary, then multi-agent reasoning (stream "Summarizing…" first).
+    # 3) Deterministic summary for agent context; internal discussion; then UI "Summarizing…" + final HOST stream.
     deterministic = build_answer_summary(primary_exe)
-    await emit_progress(on_progress, {"type": "summarizing_started"})
-    await emit_text_chunks(
-        on_progress=on_progress,
-        base_event={},
-        text="Summarizing…",
-        event_type="summarizing_chunk",
-        chunk_size=STREAM_CHUNK_SIZE,
-        delay_s=STREAM_DELAY_S,
-    )
-    await emit_progress(on_progress, {"type": "summarizing_done"})
     agents_out = await run_llm_agents(
         settings=settings,
         question=question,
@@ -500,6 +490,16 @@ async def build_completion_payload(
             proposed_sub_question=agents_out.proposed_sub_question,
             rationale=agents_out.rationale,
         )
+    await emit_progress(on_progress, {"type": "summarizing_started"})
+    await emit_text_chunks(
+        on_progress=on_progress,
+        base_event={},
+        text="Summarizing…",
+        event_type="summarizing_chunk",
+        chunk_size=STREAM_CHUNK_SIZE,
+        delay_s=STREAM_DELAY_S,
+    )
+    await emit_progress(on_progress, {"type": "summarizing_done"})
     # Stream contract is markdown-first: assistant content should be plain markdown text.
     return CompletionStreamComplete(content=agents_out.answer)
 

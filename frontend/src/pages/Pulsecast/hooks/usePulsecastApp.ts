@@ -422,11 +422,10 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
             return
           }
           if (event.type === 'execute_done') {
-            const rc = event.row_count ?? 0
             if (activeExecMsgId && activeExecTable) {
               upsertAnalystMessage(
                 activeExecMsgId,
-                `Result ${event.index}/${event.total}: ${event.sub_question} (rows: ${rc})\n\n${activeExecTable}`,
+                `Result ${event.index}/${event.total}: ${event.sub_question}\n\n${activeExecTable}`,
               )
             }
             return

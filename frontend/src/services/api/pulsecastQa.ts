@@ -88,7 +88,7 @@ export type StreamProgressEvent =
   | { type: 'planned_sub_questions_chunk'; total: number; chunk: string }
   | { type: 'planned_sub_questions_done'; total: number }
   | { type: 'sub_question_start'; index: number; total: number; sub_question: string }
-  | { type: 'sub_question_done'; index: number; total: number; sub_question: string; row_count?: number | null }
+  | { type: 'sub_question_done'; index: number; total: number; sub_question: string }
   | { type: 'tts_started'; index: number; total: number; sub_question: string }
   | { type: 'tts_label_chunk'; index: number; total: number; sub_question: string; chunk: string }
   | { type: 'tts_generating_chunk'; index: number; total: number; sub_question: string; chunk: string }
@@ -98,7 +98,7 @@ export type StreamProgressEvent =
   | { type: 'execute_label_chunk'; index: number; total: number; sub_question: string; chunk: string }
   | { type: 'execute_generating_chunk'; index: number; total: number; sub_question: string; chunk: string }
   | { type: 'execute_table_chunk'; index: number; total: number; sub_question: string; chunk: string }
-  | { type: 'execute_done'; index: number; total: number; sub_question: string; row_count?: number | null }
+  | { type: 'execute_done'; index: number; total: number; sub_question: string }
   | {
       type: 'sub_question_retry'
       index: number

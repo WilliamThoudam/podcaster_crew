@@ -435,7 +435,6 @@ async def build_completion_payload(
                 "index": idx + 1,
                 "total": len(analyst_plan.sub_questions),
                 "sub_question": sub_q,
-                "row_count": len(exe.data or []),
             },
         )
         await _emit_progress(
@@ -445,7 +444,6 @@ async def build_completion_payload(
                 "index": idx + 1,
                 "total": len(analyst_plan.sub_questions),
                 "sub_question": sub_q,
-                "row_count": len(exe.data or []),
             },
         )
 

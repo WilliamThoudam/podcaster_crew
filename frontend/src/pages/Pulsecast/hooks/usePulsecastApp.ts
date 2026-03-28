@@ -64,6 +64,11 @@ function makePulsecastStreamHandlers(
   let activeExecGenerating = ''
   let activeExecTable = ''
   let summarizingText = ''
+  let discussionAnalystMsgId: string | null = null
+  let discussionAnalystText = ''
+  let discussionTurnMsgId: string | null = null
+  let discussionTurnText = ''
+  let discussionTurnRole: 'MARKETING' | 'FINANCE' | 'CHALLENGER' | null = null
   const upsertAnalystMessage = (id: string, text: string) => {
     setQaMessages((m) => {
       const exists = m.some((msg) => msg.id === id)
@@ -95,6 +100,30 @@ function makePulsecastStreamHandlers(
             role: 'HOST',
             emoji: QA_INSIGHT_STYLE.HOST.emoji,
             color: QA_INSIGHT_STYLE.HOST.color,
+            text,
+          },
+        ]
+      }
+      return m.map((msg) => (msg.id === id ? { ...msg, text } : msg))
+    })
+  }
+  const upsertRoleMessage = (
+    role: 'MARKETING' | 'FINANCE' | 'CHALLENGER',
+    id: string,
+    text: string,
+  ) => {
+    const st = QA_INSIGHT_STYLE[role]
+    setQaMessages((m) => {
+      const exists = m.some((msg) => msg.id === id)
+      if (!exists) {
+        return [
+          ...m,
+          {
+            id,
+            kind: 'agent',
+            role,
+            emoji: st.emoji,
+            color: st.color,
             text,
           },
         ]
@@ -254,6 +283,56 @@ function makePulsecastStreamHandlers(
       return
     }
     if (event.type === 'summarizing_done') {
+      return
+    }
+    if (event.type === 'discussion_round_started') {
+      pushAnalystUpdate(`_Discussion — round ${event.round}_`)
+      return
+    }
+    if (event.type === 'discussion_analyst_started') {
+      discussionAnalystText = ''
+      discussionAnalystMsgId = newId()
+      upsertAnalystMessage(
+        discussionAnalystMsgId,
+        '_Analyst (internal discussion)…_',
+      )
+      return
+    }
+    if (event.type === 'discussion_analyst_chunk') {
+      if (!discussionAnalystMsgId) discussionAnalystMsgId = newId()
+      discussionAnalystText += event.chunk
+      upsertAnalystMessage(discussionAnalystMsgId, discussionAnalystText)
+      return
+    }
+    if (event.type === 'discussion_analyst_done') {
+      return
+    }
+    if (event.type === 'discussion_turn_started') {
+      discussionTurnText = ''
+      discussionTurnMsgId = newId()
+      discussionTurnRole = event.role
+      upsertRoleMessage(
+        event.role,
+        discussionTurnMsgId,
+        `_Round ${event.round} · ${event.role}…_`,
+      )
+      return
+    }
+    if (event.type === 'discussion_turn_chunk') {
+      if (!discussionTurnMsgId || discussionTurnRole !== event.role) {
+        discussionTurnMsgId = newId()
+        discussionTurnRole = event.role
+      }
+      discussionTurnText += event.chunk
+      upsertRoleMessage(event.role, discussionTurnMsgId, discussionTurnText)
+      return
+    }
+    if (event.type === 'discussion_turn_done') {
+      return
+    }
+    if (event.type === 'discussion_moderator') {
+      const verdict = event.continue_discussion ? 'Continue' : 'Stop'
+      pushAnalystUpdate(`_Moderator:_ **${verdict}** — ${event.reason}`)
       return
     }
   }

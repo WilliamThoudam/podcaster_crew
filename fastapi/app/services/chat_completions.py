@@ -35,6 +35,12 @@ from app.services.pulsecast_llm_agents import (
 )
 from app.services.pulsecast_planning import run_analyst_planner, run_host_planner
 from app.services.pulsecast_resume_store import PulsecastPausedSnapshot, resume_store
+from app.services.pulsecast_sse_emit import (
+    STREAM_CHUNK_SIZE,
+    STREAM_DELAY_S,
+    emit_progress,
+    emit_text_chunks,
+)
 from app.services.qa_pipeline import build_answer_summary, validate_and_normalize_sql
 
 ProgressCallback = Callable[[dict[str, Any]], Awaitable[None] | None]
@@ -53,12 +59,6 @@ class CompletionStreamPaused:
 
 
 CompletionStreamOutcome = Union[CompletionStreamComplete, CompletionStreamPaused]
-
-# -----------------------------------------------------------------------------
-# SSE progress stream pacing — used for every _emit_text_chunks step.
-# -----------------------------------------------------------------------------
-STREAM_CHUNK_SIZE = 2
-STREAM_DELAY_S = 0.001
 
 
 def _extract_last_user_question(req: OpenAIChatCompletionRequest) -> str:
@@ -124,24 +124,6 @@ def _md_table_row(headers: list[str], row: dict[str, Any]) -> str:
     return "| " + " | ".join(_escape_md_cell(row.get(h)) for h in headers) + " |"
 
 
-async def _emit_text_chunks(
-    *,
-    on_progress: ProgressCallback | None,
-    base_event: dict[str, Any],
-    text: str,
-    chunk_size: int = STREAM_CHUNK_SIZE,
-    event_type: str = "tts_sql_chunk",
-    delay_s: float = STREAM_DELAY_S,
-) -> None:
-    s = text or ""
-    for i in range(0, len(s), chunk_size):
-        await _emit_progress(
-            on_progress,
-            {**base_event, "type": event_type, "chunk": s[i : i + chunk_size]},
-        )
-        await asyncio.sleep(delay_s)
-
-
 def _chunk_json(
     *,
     completion_id: str,
@@ -169,17 +151,6 @@ def _chunk_json(
     return chunk.model_dump_json()
 
 
-async def _emit_progress(
-    cb: ProgressCallback | None,
-    event: dict[str, Any],
-) -> None:
-    if cb is None:
-        return
-    maybe = cb(event)
-    if asyncio.iscoroutine(maybe):
-        await maybe
-
-
 async def build_completion_payload(
     *,
     settings: Settings,
@@ -196,9 +167,9 @@ async def build_completion_payload(
 
     # 1) Planning stage: Host (streamed to client) then Analyst sub_questions.
     host_plan: PlanningHostOutput = await run_host_planner(settings=settings, question=question)
-    await _emit_progress(on_progress, {"type": "host_plan_started"})
+    await emit_progress(on_progress, {"type": "host_plan_started"})
     host_line = (host_plan.primary_focus or "").strip() or question
-    await _emit_text_chunks(
+    await emit_text_chunks(
         on_progress=on_progress,
         base_event={},
         text=host_line,
@@ -206,7 +177,7 @@ async def build_completion_payload(
         chunk_size=STREAM_CHUNK_SIZE,
         delay_s=STREAM_DELAY_S,
     )
-    await _emit_progress(on_progress, {"type": "host_plan_done"})
+    await emit_progress(on_progress, {"type": "host_plan_done"})
 
     analyst_plan: PlanningAnalystOutput = await run_analyst_planner(
         settings=settings,
@@ -214,17 +185,17 @@ async def build_completion_payload(
         host=host_plan,
     )
     total_sub = len(analyst_plan.sub_questions)
-    await _emit_progress(on_progress, {"type": "planned_sub_questions_started", "total": total_sub})
+    await emit_progress(on_progress, {"type": "planned_sub_questions_started", "total": total_sub})
     plan_md = "To answer this, I will break it down into steps:\n\n" + "\n".join(
         f"{i + 1}. {sq}" for i, sq in enumerate(analyst_plan.sub_questions)
     )
-    await _emit_text_chunks(
+    await emit_text_chunks(
         on_progress=on_progress,
         base_event={"total": total_sub},
         text=plan_md,
         event_type="planned_sub_questions_chunk",
     )
-    await _emit_progress(on_progress, {"type": "planned_sub_questions_done", "total": total_sub})
+    await emit_progress(on_progress, {"type": "planned_sub_questions_done", "total": total_sub})
 
     # 2) Loop over sub_questions, run text-to-SQL + execute for each.
     sub_results: list[SubResult] = []
@@ -232,7 +203,7 @@ async def build_completion_payload(
     primary_exe = None
 
     for idx, sub_q in enumerate(analyst_plan.sub_questions):
-        await _emit_progress(
+        await emit_progress(
             on_progress,
             {
                 "type": "sub_question_start",
@@ -243,7 +214,7 @@ async def build_completion_payload(
         )
         tts: TextToSqlResponse
         try:
-            await _emit_progress(
+            await emit_progress(
                 on_progress,
                 {
                     "type": "tts_started",
@@ -253,7 +224,7 @@ async def build_completion_payload(
                 },
             )
             # Stream the "Text-to-SQL N/total: <sub_question>" label chunk by chunk
-            await _emit_text_chunks(
+            await emit_text_chunks(
                 on_progress=on_progress,
                 base_event={
                     "index": idx + 1,
@@ -264,7 +235,7 @@ async def build_completion_payload(
                 event_type="tts_label_chunk",
             )
             # After the full label, stream "Generating…" on the next line (separate phase)
-            await _emit_text_chunks(
+            await emit_text_chunks(
                 on_progress=on_progress,
                 base_event={
                     "index": idx + 1,
@@ -312,7 +283,7 @@ async def build_completion_payload(
             )
 
         sql = validate_and_normalize_sql((tts.generated_sql or "").strip())
-        await _emit_text_chunks(
+        await emit_text_chunks(
             on_progress=on_progress,
             base_event={
                 "index": idx + 1,
@@ -322,7 +293,7 @@ async def build_completion_payload(
             text=sql,
             event_type="tts_sql_chunk",
         )
-        await _emit_progress(
+        await emit_progress(
             on_progress,
             {
                 "type": "tts_done",
@@ -333,7 +304,7 @@ async def build_completion_payload(
         )
         duplicate_sql = any(sr.generated_sql == sql for sr in sub_results)
         if duplicate_sql:
-            await _emit_progress(
+            await emit_progress(
                 on_progress,
                 {
                     "type": "sub_question_retry",
@@ -375,7 +346,7 @@ async def build_completion_payload(
                 # Keep the first successful SQL if retry transport fails.
                 pass
         try:
-            await _emit_progress(
+            await emit_progress(
                 on_progress,
                 {
                     "type": "execute_started",
@@ -385,7 +356,7 @@ async def build_completion_payload(
                 },
             )
             # Stream "Executing N/total: <sub_question>" first, then "Executing…" on the next line
-            await _emit_text_chunks(
+            await emit_text_chunks(
                 on_progress=on_progress,
                 base_event={
                     "index": idx + 1,
@@ -395,7 +366,7 @@ async def build_completion_payload(
                 text=f"Executing {idx + 1}/{len(analyst_plan.sub_questions)}: {sub_q}",
                 event_type="execute_label_chunk",
             )
-            await _emit_text_chunks(
+            await emit_text_chunks(
                 on_progress=on_progress,
                 base_event={
                     "index": idx + 1,
@@ -440,7 +411,7 @@ async def build_completion_payload(
             )
         )
         table_md = _to_markdown_table((exe.data or [])[:20])
-        await _emit_text_chunks(
+        await emit_text_chunks(
             on_progress=on_progress,
             base_event={
                 "index": idx + 1,
@@ -450,7 +421,7 @@ async def build_completion_payload(
             text=table_md,
             event_type="execute_table_chunk",
         )
-        await _emit_progress(
+        await emit_progress(
             on_progress,
             {
                 "type": "execute_done",
@@ -459,7 +430,7 @@ async def build_completion_payload(
                 "sub_question": sub_q,
             },
         )
-        await _emit_progress(
+        await emit_progress(
             on_progress,
             {
                 "type": "sub_question_done",
@@ -478,8 +449,8 @@ async def build_completion_payload(
 
     # 3) Deterministic summary, then multi-agent reasoning (stream "Summarizing…" first).
     deterministic = build_answer_summary(primary_exe)
-    await _emit_progress(on_progress, {"type": "summarizing_started"})
-    await _emit_text_chunks(
+    await emit_progress(on_progress, {"type": "summarizing_started"})
+    await emit_text_chunks(
         on_progress=on_progress,
         base_event={},
         text="Summarizing…",
@@ -487,7 +458,7 @@ async def build_completion_payload(
         chunk_size=STREAM_CHUNK_SIZE,
         delay_s=STREAM_DELAY_S,
     )
-    await _emit_progress(on_progress, {"type": "summarizing_done"})
+    await emit_progress(on_progress, {"type": "summarizing_done"})
     agents_out = await run_llm_agents(
         settings=settings,
         question=question,
@@ -497,11 +468,12 @@ async def build_completion_payload(
         sub_results=sub_results,
         host_plan=host_plan,
         analyst_plan=analyst_plan,
+        on_progress=on_progress,
     )
     if isinstance(agents_out, LlmAgentsPaused):
         snap = PulsecastPausedSnapshot(
             pipeline=agents_out.pipeline,
-            prior=agents_out.prior,
+            discussion=agents_out.discussion,
             question=agents_out.question,
             generated_sql=agents_out.generated_sql,
             primary_exe=agents_out.primary_exe,
@@ -514,7 +486,7 @@ async def build_completion_payload(
             openai_user=req.user,
         )
         token = resume_store.issue_token(snap)
-        await _emit_progress(
+        await emit_progress(
             on_progress,
             {
                 "type": "sql_approval_required",
@@ -550,7 +522,7 @@ async def build_resume_payload(
     sub_results = list(snapshot.sub_results)
 
     if not approved:
-        await _emit_progress(on_progress, {"type": "sql_followup_declined"})
+        await emit_progress(on_progress, {"type": "sql_followup_declined"})
         agents_done = await run_llm_agents_host_only(
             settings=settings,
             question=snapshot.question,
@@ -560,7 +532,7 @@ async def build_resume_payload(
             sub_results=sub_results,
             host_plan=snapshot.host_plan,
             analyst_plan=snapshot.analyst_plan,
-            prior=snapshot.prior,
+            discussion=snapshot.discussion,
             pipeline=snapshot.pipeline,
             user_declined_extra_sql=True,
         )
@@ -570,7 +542,7 @@ async def build_resume_payload(
     idx = 0
     total = 1
 
-    await _emit_progress(
+    await emit_progress(
         on_progress,
         {
             "type": "sub_question_start",
@@ -580,7 +552,7 @@ async def build_resume_payload(
         },
     )
     try:
-        await _emit_progress(
+        await emit_progress(
             on_progress,
             {
                 "type": "tts_started",
@@ -589,7 +561,7 @@ async def build_resume_payload(
                 "sub_question": sub_q,
             },
         )
-        await _emit_text_chunks(
+        await emit_text_chunks(
             on_progress=on_progress,
             base_event={
                 "index": idx + 1,
@@ -599,7 +571,7 @@ async def build_resume_payload(
             text=f"Text-to-SQL {idx + 1}/{total}: {sub_q}",
             event_type="tts_label_chunk",
         )
-        await _emit_text_chunks(
+        await emit_text_chunks(
             on_progress=on_progress,
             base_event={
                 "index": idx + 1,
@@ -645,7 +617,7 @@ async def build_resume_payload(
         )
 
     sql = validate_and_normalize_sql((tts.generated_sql or "").strip())
-    await _emit_text_chunks(
+    await emit_text_chunks(
         on_progress=on_progress,
         base_event={
             "index": idx + 1,
@@ -655,7 +627,7 @@ async def build_resume_payload(
         text=sql,
         event_type="tts_sql_chunk",
     )
-    await _emit_progress(
+    await emit_progress(
         on_progress,
         {
             "type": "tts_done",
@@ -666,7 +638,7 @@ async def build_resume_payload(
     )
     duplicate_sql = any(sr.generated_sql == sql for sr in sub_results)
     if duplicate_sql:
-        await _emit_progress(
+        await emit_progress(
             on_progress,
             {
                 "type": "sub_question_retry",
@@ -705,7 +677,7 @@ async def build_resume_payload(
             pass
 
     try:
-        await _emit_progress(
+        await emit_progress(
             on_progress,
             {
                 "type": "execute_started",
@@ -714,7 +686,7 @@ async def build_resume_payload(
                 "sub_question": sub_q,
             },
         )
-        await _emit_text_chunks(
+        await emit_text_chunks(
             on_progress=on_progress,
             base_event={
                 "index": idx + 1,
@@ -724,7 +696,7 @@ async def build_resume_payload(
             text=f"Executing {idx + 1}/{total}: {sub_q}",
             event_type="execute_label_chunk",
         )
-        await _emit_text_chunks(
+        await emit_text_chunks(
             on_progress=on_progress,
             base_event={
                 "index": idx + 1,
@@ -765,7 +737,7 @@ async def build_resume_payload(
         )
     )
     table_md = _to_markdown_table((exe.data or [])[:20])
-    await _emit_text_chunks(
+    await emit_text_chunks(
         on_progress=on_progress,
         base_event={
             "index": idx + 1,
@@ -775,7 +747,7 @@ async def build_resume_payload(
         text=table_md,
         event_type="execute_table_chunk",
     )
-    await _emit_progress(
+    await emit_progress(
         on_progress,
         {
             "type": "execute_done",
@@ -784,7 +756,7 @@ async def build_resume_payload(
             "sub_question": sub_q,
         },
     )
-    await _emit_progress(
+    await emit_progress(
         on_progress,
         {
             "type": "sub_question_done",
@@ -794,8 +766,8 @@ async def build_resume_payload(
         },
     )
 
-    await _emit_progress(on_progress, {"type": "summarizing_started"})
-    await _emit_text_chunks(
+    await emit_progress(on_progress, {"type": "summarizing_started"})
+    await emit_text_chunks(
         on_progress=on_progress,
         base_event={},
         text="Summarizing…",
@@ -803,7 +775,7 @@ async def build_resume_payload(
         chunk_size=STREAM_CHUNK_SIZE,
         delay_s=STREAM_DELAY_S,
     )
-    await _emit_progress(on_progress, {"type": "summarizing_done"})
+    await emit_progress(on_progress, {"type": "summarizing_done"})
 
     agents_done = await run_llm_agents_host_only(
         settings=settings,
@@ -814,7 +786,7 @@ async def build_resume_payload(
         sub_results=sub_results,
         host_plan=snapshot.host_plan,
         analyst_plan=snapshot.analyst_plan,
-        prior=snapshot.prior,
+        discussion=snapshot.discussion,
         pipeline=snapshot.pipeline,
         user_declined_extra_sql=False,
     )

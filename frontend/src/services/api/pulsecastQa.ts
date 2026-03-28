@@ -125,6 +125,27 @@ export type StreamProgressEvent =
   | { type: 'summarizing_started' }
   | { type: 'summarizing_chunk'; chunk: string }
   | { type: 'summarizing_done' }
+  | { type: 'discussion_round_started'; round: number }
+  | { type: 'discussion_analyst_started' }
+  | { type: 'discussion_analyst_chunk'; chunk: string }
+  | { type: 'discussion_analyst_done' }
+  | {
+      type: 'discussion_turn_started'
+      role: 'MARKETING' | 'FINANCE' | 'CHALLENGER'
+      round: number
+    }
+  | {
+      type: 'discussion_turn_chunk'
+      role: 'MARKETING' | 'FINANCE' | 'CHALLENGER'
+      round: number
+      chunk: string
+    }
+  | {
+      type: 'discussion_turn_done'
+      role: 'MARKETING' | 'FINANCE' | 'CHALLENGER'
+      round: number
+    }
+  | { type: 'discussion_moderator'; continue_discussion: boolean; reason: string }
   | {
       type: 'sql_approval_required'
       resume_token: string

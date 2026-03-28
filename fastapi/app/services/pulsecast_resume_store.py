@@ -12,7 +12,11 @@ from app.models.schemas import (
     PlanningHostOutput,
     SubResult,
 )
-from app.services.pulsecast_llm_agents import _AgentOut
+from app.services.pulsecast_llm_agents import (
+    DiscussionState,
+    DiscussionTurn,
+    _AgentOut,
+)
 
 
 @dataclass
@@ -20,7 +24,7 @@ class PulsecastPausedSnapshot:
     """Server-side state to resume after sql_approval_required (HITL)."""
 
     pipeline: list[AgentPipelineStep]
-    prior: dict[str, _AgentOut]
+    discussion: DiscussionState
     question: str
     generated_sql: str
     primary_exe: ExecuteSqlResponse
@@ -34,9 +38,9 @@ class PulsecastPausedSnapshot:
 
     def to_json_dict(self) -> dict[str, Any]:
         return {
-            "v": 1,
             "pipeline": [p.model_dump(mode="json") for p in self.pipeline],
-            "prior": {k: v.model_dump(mode="json") for k, v in self.prior.items()},
+            "analyst": self.discussion.analyst.model_dump(mode="json"),
+            "discussion_turns": [t.model_dump(mode="json") for t in self.discussion.turns],
             "question": self.question,
             "generated_sql": self.generated_sql,
             "primary_exe": self.primary_exe.model_dump(mode="json"),
@@ -51,14 +55,20 @@ class PulsecastPausedSnapshot:
 
     @staticmethod
     def from_json_dict(d: dict[str, Any]) -> PulsecastPausedSnapshot:
-        if d.get("v") != 1:
-            raise ValueError("Unsupported paused snapshot version")
+        try:
+            analyst = _AgentOut.model_validate(d["analyst"])
+            turns_raw = d["discussion_turns"]
+            turns = [DiscussionTurn.model_validate(x) for x in turns_raw]
+        except KeyError as e:
+            raise ValueError(f"Invalid paused snapshot (missing field: {e.args[0]})") from e
+        discussion = DiscussionState(analyst=analyst, turns=turns)
+
         pipeline = [AgentPipelineStep.model_validate(x) for x in d["pipeline"]]
-        prior = {k: _AgentOut.model_validate(v) for k, v in d["prior"].items()}
         sub_results = [SubResult.model_validate(x) for x in d["sub_results"]]
+
         return PulsecastPausedSnapshot(
             pipeline=pipeline,
-            prior=prior,
+            discussion=discussion,
             question=d["question"],
             generated_sql=d["generated_sql"],
             primary_exe=ExecuteSqlResponse.model_validate(d["primary_exe"]),

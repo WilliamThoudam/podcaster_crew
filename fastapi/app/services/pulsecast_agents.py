@@ -11,13 +11,13 @@ _MARKETING_Q = re.compile(r"(campaign|marketing|promo|brand|advert|channel|acqui
 
 
 def _row_count(exe: ExecuteSqlResponse) -> int:
-    if exe.rowCount is not None:
-        return int(exe.rowCount)
-    return len(exe.data)
+    return len(exe.data or [])
 
 
 def _field_names(exe: ExecuteSqlResponse) -> str:
-    return " ".join(f.name for f in exe.fields)
+    if not exe.data:
+        return ""
+    return " ".join(str(k) for k in exe.data[0].keys())
 
 
 def build_pulsecast_payload(
@@ -65,7 +65,7 @@ def build_pulsecast_payload(
             id="challenger",
             status="completed",
             phase="validation",
-            detail="Sample size and query-limit checks",
+            detail="Sample size from returned data rows only",
         ),
     ]
 
@@ -94,10 +94,9 @@ def build_pulsecast_payload(
             "if the business question is financial, consider refining the question or schema context."
         )
 
-    if exe.limited:
+    if rc == 0:
         challenger_text = (
-            "Heads-up: the warehouse capped rows (limited run). "
-            "Confirm totals with an export or an explicit LIMIT that matches your governance rules."
+            "No rows in `data`—check filters or schema before relying on this answer."
         )
     elif rc <= 3:
         challenger_text = (

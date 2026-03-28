@@ -62,14 +62,14 @@ def _compact_sub_results(
 ) -> list[dict[str, Any]]:
     compact: list[dict[str, Any]] = []
     for sr in sub_results:
+        rows = sr.execute.data or []
         compact.append(
             {
                 "sub_question": sr.sub_question,
                 "generated_sql": sr.generated_sql,
-                "rowCount": sr.execute.rowCount,
-                "limited": sr.execute.limited,
-                "note": sr.execute.note,
-                "sample_rows": _safe_sample(sr.execute, max_rows=max_rows_per_result),
+                "rows_returned": len(rows),
+                "columns_in_data": list(rows[0].keys()) if rows else [],
+                "data_sample": _safe_sample(sr.execute, max_rows=max_rows_per_result),
             }
         )
     return compact
@@ -85,16 +85,13 @@ def _context_blob_compact(
     host_plan: PlanningHostOutput | None = None,
     analyst_plan: PlanningAnalystOutput | None = None,
 ) -> dict[str, Any]:
+    primary = exe.data or []
     base: dict[str, Any] = {
         "question": question,
         "generated_sql": generated_sql,
-        "executed_query": exe.query,
-        "rowCount": exe.rowCount,
-        "limited": exe.limited,
-        "maxRecords": exe.maxRecords,
-        "note": exe.note,
-        "fields": [f.model_dump() for f in (exe.fields or [])],
-        "sample_rows": _safe_sample(exe),
+        "rows_returned": len(primary),
+        "columns_in_data": list(primary[0].keys()) if primary else [],
+        "data_sample": _safe_sample(exe),
         "deterministic_summary": deterministic_summary,
     }
     if sub_results:
@@ -119,13 +116,18 @@ def _system_prompt_internal(role: PulsecastRole) -> str:
     return (
         "You are a Pulsecast internal enrichment agent.\n"
         f"Your role is: {role}\n\n"
+        "Database execution context includes ONLY the `data_sample` row objects (and per sub_question "
+        "`data_sample` entries under sub_results), plus `rows_returned` and `columns_in_data` derived "
+        "from that same data array. There is no separate metadata from the execute tool (no server "
+        "rowCount beyond len(data), no limit flags, no column typing from the tool).\n"
+        "Treat quantitative claims as supported only by values visible in those samples; SQL states intent.\n\n"
         "You MUST return ONLY valid JSON (no markdown, no backticks, no extra text).\n"
         "Schema:\n"
         '{ "text": string, "phase": string, "detail": string|null }\n\n'
         "Rules:\n"
-        "- Base your response strictly on the provided context (SQL + execution results).\n"
+        "- Base your response strictly on the context JSON: question, generated_sql, data samples, planning.\n"
         "- Your output is internal notes for the Host composer, not a user-facing response.\n"
-        "- If data is insufficient, say what is missing and suggest the smallest next query refinement.\n"
+        "- If samples are empty or too thin, say so and suggest the smallest next query refinement.\n"
         "- Keep it short and actionable (2-5 sentences).\n"
     )
 
@@ -133,14 +135,17 @@ def _system_prompt_internal(role: PulsecastRole) -> str:
 def _system_prompt_host_composer() -> str:
     return (
         "You are the HOST composer in Pulsecast.\n"
-        "You synthesize one final user-facing answer from SQL evidence and internal agent notes.\n\n"
+        "You produce the single final answer shown to the user. Prior agents only saw `data_sample` rows "
+        "(and sub_results[].data_sample) from execute_sql—no extra execution metadata.\n"
+        "Synthesize their internal JSON notes with that evidence; do not invent totals, limits, or cell "
+        "values not present in the samples.\n\n"
         "You MUST return ONLY valid JSON (no markdown, no backticks, no extra text).\n"
         "Schema:\n"
         '{ "text": string, "phase": string, "detail": string|null }\n\n'
         "Rules:\n"
-        "- Write one clean final answer for the user.\n"
+        "- Write one clean, user-facing answer (plain language; markdown lists ok).\n"
         "- Do not output internal debate or role-play dialogue.\n"
-        "- If evidence is limited, clearly state the constraint and smallest next data step.\n"
+        "- If evidence is thin, state what the samples support and what would need another query.\n"
         "- Keep the answer concise and decision-oriented.\n"
     )
 

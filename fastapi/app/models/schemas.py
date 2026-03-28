@@ -51,28 +51,13 @@ class TextToSqlResponse(BaseModel):
     error: str | None = None
 
 
-class ExecuteSqlField(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-    name: str
-    type: str | None = None
-    scale: int | None = None
-    nullable: bool | None = None
-
-
 class ExecuteSqlResponse(BaseModel):
+    """MCP execute_sql: only success + data are used; extra keys from the tool are ignored."""
+
     model_config = ConfigDict(extra="ignore")
 
     success: bool = False
     data: list[dict[str, Any]] = Field(default_factory=list)
-    rowCount: int | None = None
-    fields: list[ExecuteSqlField] = Field(default_factory=list)
-    executionTime: int | None = None
-    query: str | None = None
-    originalQuery: str | None = None
-    limited: bool | None = None
-    maxRecords: int | None = None
-    note: str | None = None
 
 
 class PlanningHostOutput(BaseModel):

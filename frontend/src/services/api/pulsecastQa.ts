@@ -1,21 +1,6 @@
-export type ExecuteSqlField = {
-  name: string
-  type?: string | null
-  scale?: number | null
-  nullable?: boolean | null
-}
-
 export type ExecuteSqlPayload = {
   success: boolean
   data: Record<string, unknown>[]
-  rowCount?: number | null
-  fields: ExecuteSqlField[]
-  executionTime?: number | null
-  query?: string | null
-  originalQuery?: string | null
-  limited?: boolean | null
-  maxRecords?: number | null
-  note?: string | null
 }
 
 export type PulsecastAgentId = 'host' | 'analyst' | 'marketing' | 'finance' | 'challenger'

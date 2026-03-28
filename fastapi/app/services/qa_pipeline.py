@@ -58,20 +58,16 @@ def _format_value(v: Any, max_len: int = 80) -> str:
 
 
 def build_answer_summary(exec_result: ExecuteSqlResponse, sample_rows: int = 5) -> str:
+    """Summarise using only the execute_sql `data` array (row count = len(data))."""
     parts: list[str] = []
-    rc = exec_result.rowCount if exec_result.rowCount is not None else len(exec_result.data)
-    parts.append(f"Returned {rc} row(s).")
+    data = exec_result.data or []
+    rc = len(data)
+    parts.append(f"Returned {rc} row(s); evidence is only the rows in `data`.")
 
-    if exec_result.limited:
-        parts.append(
-            f"Results were limited (max {exec_result.maxRecords} rows). "
-            f"{exec_result.note or ''}".strip()
-        )
-
-    if exec_result.data:
-        parts.append("Sample:")
-        col_keys = list(exec_result.data[0].keys())
-        for row in exec_result.data[:sample_rows]:
+    if data:
+        parts.append("Sample rows from data:")
+        col_keys = list(data[0].keys())
+        for row in data[:sample_rows]:
             cells = ", ".join(f"{k}={_format_value(row.get(k))}" for k in col_keys[:6])
             if len(col_keys) > 6:
                 cells += ", …"

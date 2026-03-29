@@ -4,12 +4,12 @@ import json
 import re
 from typing import Any
 
-import httpx
 from fastapi import HTTPException, status
+from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.clients.openai_chat import chat_complete_json, extract_assistant_text
 from app.config import Settings
+from app.llm.chat_model import build_chat_model
 from app.models.schemas import PlanningAnalystOutput, PlanningHostOutput
 
 
@@ -131,24 +131,47 @@ def _analyst_user_prompt(question: str, host: PlanningHostOutput) -> str:
     )
 
 
+def _message_content_str(content: str | list[str | dict]) -> str:
+    if isinstance(content, str):
+        return content
+    parts: list[str] = []
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "text":
+            parts.append(str(block.get("text", "")))
+        elif isinstance(block, str):
+            parts.append(block)
+    return "".join(parts)
+
+
+async def _invoke_json_object(
+    *,
+    settings: Settings,
+    system_prompt: str,
+    user_prompt: str,
+) -> str:
+    llm = build_chat_model(settings).bind(response_format={"type": "json_object"})
+    resp = await llm.ainvoke(
+        [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=user_prompt),
+        ],
+    )
+    text = _message_content_str(resp.content).strip()
+    if not text:
+        raise ValueError("Empty model content")
+    return text
+
+
 async def run_host_planner(*, settings: Settings, question: str) -> PlanningHostOutput:
     try:
-        resp = await chat_complete_json(
-            base_url=settings.openai_base_url,
-            api_key=settings.openai_api_key,
-            model=settings.openai_model,
-            temperature=settings.openai_temperature,
-            timeout_seconds=settings.openai_timeout_seconds,
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": _host_system_prompt()},
-                {"role": "user", "content": _host_user_prompt(question)},
-            ],
+        content = await _invoke_json_object(
+            settings=settings,
+            system_prompt=_host_system_prompt(),
+            user_prompt=_host_user_prompt(question),
         )
-        content = extract_assistant_text(resp)
         data = json.loads(content)
         out = _HostOut.model_validate(data)
-    except (httpx.HTTPError, ValueError, TypeError, json.JSONDecodeError) as e:
+    except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Host planning failed: {e}",
@@ -160,25 +183,17 @@ async def run_analyst_planner(
     *, settings: Settings, question: str, host: PlanningHostOutput
 ) -> PlanningAnalystOutput:
     async def _call_planner(system_prompt: str) -> _AnalystOut:
-        resp = await chat_complete_json(
-            base_url=settings.openai_base_url,
-            api_key=settings.openai_api_key,
-            model=settings.openai_model,
-            temperature=settings.openai_temperature,
-            timeout_seconds=settings.openai_timeout_seconds,
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": _analyst_user_prompt(question, host)},
-            ],
+        content = await _invoke_json_object(
+            settings=settings,
+            system_prompt=system_prompt,
+            user_prompt=_analyst_user_prompt(question, host),
         )
-        content = extract_assistant_text(resp)
         data = json.loads(content)
         return _AnalystOut.model_validate(data)
 
     try:
         out = await _call_planner(_analyst_system_prompt())
-    except (httpx.HTTPError, ValueError, TypeError, json.JSONDecodeError) as e:
+    except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Analyst planning failed: {e}",
@@ -191,7 +206,7 @@ async def run_analyst_planner(
         try:
             out = await _call_planner(_analyst_system_prompt_strict())
             cleaned = [_clean_sub_question(q) for q in out.sub_questions if q and _clean_sub_question(q)]
-        except (httpx.HTTPError, ValueError, TypeError, json.JSONDecodeError):
+        except Exception:
             pass
 
     sub_questions = [q for q in cleaned if not _looks_like_sql(q)]

@@ -7,7 +7,7 @@ from typing import Any, Awaitable, Callable, Union
 
 ProgressCallback = Callable[[dict[str, Any]], Union[Awaitable[None], None]]
 
-STREAM_CHUNK_SIZE = 2
+STREAM_CHUNK_SIZE = 10
 STREAM_DELAY_S = 0.001
 
 

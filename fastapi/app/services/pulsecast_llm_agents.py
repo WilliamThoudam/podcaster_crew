@@ -5,12 +5,12 @@ import re
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Literal, Union
 
-import httpx
 from fastapi import HTTPException, status
+from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.clients.openai_chat import chat_complete_stream_text
 from app.config import Settings
+from app.llm.chat_model import build_chat_model
 from app.models.schemas import (
     AgentInsight,
     AgentPipelineStep,
@@ -400,17 +400,32 @@ def _agent_id(role: PulsecastRole) -> PulsecastAgentId:
     }[role]
 
 
+def _chunk_text(content: str | list[str | dict]) -> str:
+    if isinstance(content, str):
+        return content
+    parts: list[str] = []
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "text":
+            parts.append(str(block.get("text", "")))
+        elif isinstance(block, str):
+            parts.append(block)
+    return "".join(parts)
+
+
 async def _stream_llm_text(*, settings: Settings, messages: list[dict[str, str]]) -> str:
+    model = build_chat_model(settings)
+    lc_messages: list[SystemMessage | HumanMessage] = []
+    for m in messages:
+        role, content = m["role"], m["content"]
+        if role == "system":
+            lc_messages.append(SystemMessage(content=content))
+        else:
+            lc_messages.append(HumanMessage(content=content))
     text_parts: list[str] = []
-    async for delta in chat_complete_stream_text(
-        base_url=settings.openai_base_url,
-        api_key=settings.openai_api_key,
-        model=settings.openai_model,
-        temperature=settings.openai_temperature,
-        timeout_seconds=settings.openai_timeout_seconds,
-        messages=messages,
-    ):
-        text_parts.append(delta)
+    async for chunk in model.astream(lc_messages):
+        piece = _chunk_text(chunk.content)
+        if piece:
+            text_parts.append(piece)
     return "".join(text_parts).strip()
 
 
@@ -443,7 +458,12 @@ async def _run_agent_json(
         if not text:
             raise ValueError(f"Empty streamed content from agent {role_label}")
         return _parse_agent_json(text)
-    except (httpx.HTTPError, ValueError, json.JSONDecodeError) as e:
+    except (ValueError, json.JSONDecodeError) as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"LLM agent {role_label} failed: {e}",
+        ) from e
+    except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"LLM agent {role_label} failed: {e}",
@@ -462,7 +482,12 @@ async def _run_moderator_call(*, settings: Settings, user_content: str) -> _Mode
         if not text:
             raise ValueError("Empty streamed content from moderator")
         return _parse_moderator_json(text)
-    except (httpx.HTTPError, ValueError, json.JSONDecodeError) as e:
+    except (ValueError, json.JSONDecodeError) as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"LLM moderator failed: {e}",
+        ) from e
+    except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"LLM moderator failed: {e}",

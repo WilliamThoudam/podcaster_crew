@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+"""
+Non-SSE QA endpoint: text-to-SQL + execute + `run_llm_agents`.
+Uses the same LangChain-backed LLM stack as the chat completion graph via `pulsecast_llm_agents`.
+"""
+
 import re
 from typing import Any
 

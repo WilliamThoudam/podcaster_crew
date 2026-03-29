@@ -470,7 +470,7 @@ export function Pulsecast() {
                         {seg.text}
                         {showSql ? (
                           <div className="sql-block">
-                            <span className="sql-label">SQL QUERY EXECUTED</span>
+                            <span className="sql-label">SQL QUERY GENERATED</span>
                             <span>{app.analystSqlSnippet}</span>
                           </div>
                         ) : null}

@@ -48,7 +48,7 @@ export function PulsecastMarkdown({ content }: PulsecastMarkdownProps) {
             if (isSqlHighlightedCode(children)) {
               return (
                 <div className="sql-block markdown-sql-block">
-                  <span className="sql-label">SQL QUERY EXECUTED</span>
+                  <span className="sql-label">SQL QUERY GENERATED</span>
                   <pre
                     {...props}
                     className={['markdown-sql-pre-inner', className].filter(Boolean).join(' ')}

@@ -754,7 +754,6 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
           u.rate = 0.95
           synth.speak(u)
         }
-        window.setTimeout(() => showToast('▶ Podcast resuming from live point…'), 1000)
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e)
         if (stream?.getTypingBubbleCreated()) {
@@ -778,7 +777,7 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
         setQaStreaming(false)
       }
     },
-    [qaInput, qaMessages, setThinkingRole, showToast],
+    [qaInput, qaMessages, setThinkingRole],
   )
 
   const submitSqlHitl = useCallback(
@@ -843,7 +842,6 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
           u.rate = 0.95
           synth.speak(u)
         }
-        window.setTimeout(() => showToast('▶ Podcast resuming from live point…'), 1000)
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e)
         if (stream?.getTypingBubbleCreated()) {
@@ -868,7 +866,7 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
         setQaStreaming(false)
       }
     },
-    [setThinkingRole, showToast, sqlHitlEdited, sqlHitlToken],
+    [setThinkingRole, sqlHitlEdited, sqlHitlToken],
   )
 
   const submitInterrupt = useCallback(() => {

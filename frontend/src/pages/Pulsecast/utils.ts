@@ -14,6 +14,54 @@ export function formatQaClock(ms: number): string {
   })
 }
 
+/** True when content clearly crosses block boundaries (CommonMark emphasis cannot span these). */
+function hasBlockMarkdownStructure(s: string): boolean {
+  if (/\n\s*\n/.test(s)) return true
+  if (/\n\s*(?:[-*+]|\d{1,3}\.)\s/.test(s)) return true
+  return false
+}
+
+function tryStripOuterDelimiter(markdown: string, open: string, close: string): string | null {
+  const trimmed = markdown.trim()
+  if (trimmed.length < open.length + close.length + 1) return null
+  if (!trimmed.startsWith(open) || !trimmed.endsWith(close)) return null
+  if (open === '*' && /^\*\s/.test(trimmed)) return null
+  const inner = trimmed.slice(open.length, trimmed.length - close.length)
+  if (!hasBlockMarkdownStructure(inner)) return null
+  const leading = markdown.match(/^\s*/)?.[0] ?? ''
+  const trailing = markdown.match(/\s*$/)?.[0] ?? ''
+  return leading + inner.replace(/^\s+/, '') + trailing
+}
+
+/**
+ * LLMs often wrap a whole section in `_..._` or `*...*` for emphasis, but CommonMark only allows
+ * emphasis inside a single block — lists and paragraph breaks break pairing, so delimiters show as
+ * literal characters. Strip one outer wrapper when it clearly spans blocks.
+ */
+export function normalizePulsecastMarkdown(markdown: string): string {
+  if (!markdown) return markdown
+  let s = markdown
+  const pairs: [string, string][] = [
+    ['__', '__'],
+    ['**', '**'],
+    ['_', '_'],
+    ['*', '*'],
+  ]
+  for (let i = 0; i < 4; i++) {
+    let changed = false
+    for (const [open, close] of pairs) {
+      const next = tryStripOuterDelimiter(s, open, close)
+      if (next != null) {
+        s = next
+        changed = true
+        break
+      }
+    }
+    if (!changed) break
+  }
+  return s
+}
+
 const COLOR_MAP: Record<string, string> = {
   'var(--host)': '0,212,255',
   'var(--analyst)': '123,97,255',

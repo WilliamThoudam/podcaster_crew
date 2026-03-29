@@ -3,6 +3,7 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeHighlight from 'rehype-highlight'
 import { PulsecastTable } from './PulsecastTable'
+import { normalizePulsecastMarkdown } from '../utils'
 
 type PulsecastMarkdownProps = {
   content: string
@@ -18,6 +19,7 @@ function isSqlHighlightedCode(children: ReactNode): boolean {
 
 export function PulsecastMarkdown({ content }: PulsecastMarkdownProps) {
   if (!content) return null
+  const normalized = normalizePulsecastMarkdown(content)
   return (
     <div className="pulsecast-markdown">
       <ReactMarkdown
@@ -64,7 +66,7 @@ export function PulsecastMarkdown({ content }: PulsecastMarkdownProps) {
           },
         }}
       >
-        {content}
+        {normalized}
       </ReactMarkdown>
     </div>
   )

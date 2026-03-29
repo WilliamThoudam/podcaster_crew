@@ -124,6 +124,9 @@ _SCHEMA_INTERNAL = (
     "Rules:\n"
     "- `text`: 2–6 sentences; actionable internal notes for the Host composer.\n"
     "- `detail`: optional plain string only (markdown bullets ok); use null if unused — never a JSON object or array.\n"
+    "- Do not wrap a whole multi-line block (e.g. intro plus bullet list) in one `_..._`, `*...*`, "
+    "`__...__`, or `**...**` pair — UI markdown cannot emphasize across blocks; use `**phrase**` on "
+    "short spans or plain bullets only.\n"
     "- Stay within your role boundaries above.\n"
 )
 
@@ -144,6 +147,8 @@ _SCHEMA_CHALLENGER = (
     "needed), same style as planning sub_questions — no SQL, no chat phrasing, no “confirm availability” asks.\n"
     "- If false: proposed_sub_question and why MUST be null.\n"
     "- `detail` must be a plain string or null, never a nested JSON object.\n"
+    "- In `detail`, do not wrap a whole bullet block in one `_..._` / `*...*` / `__...__` / `**...**` "
+    "across line breaks — use short `**` spans or plain bullets.\n"
     "- Keep text 2–6 sentences.\n"
 )
 
@@ -169,6 +174,9 @@ _HOST_COMPOSER = (
     "- `phase` must be exactly: Final Answer\n"
     "- `detail`: optional one-line string or null — never a JSON object.\n"
     "- Plain language; markdown lists allowed in `text`.\n"
+    "- Do not wrap the entire answer (intro + bullets) in a single `_..._`, `*...*`, `__...__`, or "
+    "`**...**` wrapper — standard markdown does not italicize/bold across lists; delimiters would show "
+    "literally. Use `**short phrase**`, `###` headings, or unadorned bullets instead.\n"
 )
 
 _MODERATOR = (

@@ -769,7 +769,7 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
             pk === 'duplicate_sub_question'
               ? '_The same SQL was generated as for an earlier step._ The analyst suggested a revised sub-question. Use the dialog to **approve** (run SQL; you may edit the wording) or **decline** (skip this step and continue with remaining steps).'
               : pk === 'web_search'
-                ? '_Web Crawler proposed a public web search_ (Serper). Use the dialog to **approve** (run search; you may edit the query) or **decline** (continue without web results).'
+                ? '_Web Crawler proposed a public web search_. Use the dialog to **approve** (run search; you may edit the query) or **decline** (continue without web results).'
                 : '_Challenger proposed a follow-up analytic query_ (for text-to-SQL). Use the dialog to **approve** (run SQL) or **decline** (answer with current data only).'
           if (sid) {
             setQaMessages((m) =>

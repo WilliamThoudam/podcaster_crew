@@ -79,7 +79,7 @@ async def _emit_web_search_results_sse(
     q = (query or "").strip()
     base: dict[str, Any] = {"query": q}
     await emit_progress(on_progress, {**base, "type": "web_search_results_started"})
-    header = f"**Web search (Serper)**\n\n**Query:** {q}\n\n" if q else "**Web search (Serper)**\n\n"
+    header = f"**Web search**\n\n**Query:** {q}\n\n" if q else "**Web search**\n\n"
     await emit_text_chunks(
         on_progress=on_progress,
         base_event=base,

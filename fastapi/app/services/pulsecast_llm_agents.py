@@ -7,7 +7,7 @@ from typing import Any, Awaitable, Callable, Literal, Union
 
 from fastapi import HTTPException, status
 from langchain_core.messages import HumanMessage, SystemMessage
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.config import Settings
 from app.llm.chat_model import build_chat_model
@@ -39,15 +39,37 @@ DiscussantRole = Literal["MARKETING", "FINANCE", "CHALLENGER"]
 AgentProgressCallback = Callable[[dict[str, Any]], Union[Awaitable[None], None]] | None
 
 
-class _AgentOut(BaseModel):
+class _HostOut(BaseModel):
+    """HOST composer only; unchanged JSON shape (text / phase / detail)."""
+
     model_config = ConfigDict(extra="ignore")
 
     text: str = Field(..., min_length=1)
     phase: str = Field(..., min_length=1)
     detail: str | None = None
+
+
+class _AgentOut(BaseModel):
+    """Unified internal panel output (ANALYST, MARKETING, FINANCE, CHALLENGER)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    insight: str = Field(..., min_length=1)
+    reasoning: str = Field(..., min_length=1)
+    confidence: float = Field(ge=0.0, le=1.0)
+    phase: str = Field(..., min_length=1)
+    detail: str | None = None
+    headline: str | None = None
     needs_more_data: bool = False
-    proposed_sub_question: str | None = None
-    why: str | None = None
+    new_question: str | None = None
+    new_question_rationale: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _legacy_panel_aliases(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            return _normalize_panel_agent_out_dict(data)
+        return data
 
 
 class DiscussionTurn(BaseModel):
@@ -95,20 +117,81 @@ def _coerce_required_str(v: Any, *, field: str) -> str:
     return str(v)
 
 
-def _normalize_agent_out_dict(obj: dict[str, Any]) -> dict[str, Any]:
-    """LLMs sometimes put structured JSON in `detail`; Pydantic expects str | null."""
+_DEFAULT_REASONING = "Derived from the samples and role mandate as described in insight."
+
+
+def _normalize_panel_agent_out_dict(obj: dict[str, Any]) -> dict[str, Any]:
+    """Map legacy keys (text, proposed_sub_question, why) and defaults before validation."""
+    out = dict(obj)
+
+    ins = out.get("insight")
+    tx = out.get("text")
+    if ins is not None and str(ins).strip():
+        out["insight"] = _coerce_required_str(ins, field="insight")
+    elif tx is not None and str(tx).strip():
+        out["insight"] = _coerce_required_str(tx, field="text")
+    else:
+        raise ValueError("Panel agent JSON must include non-empty insight or legacy text")
+
+    rs = out.get("reasoning")
+    if rs is None or not str(rs).strip():
+        out["reasoning"] = _DEFAULT_REASONING
+    else:
+        out["reasoning"] = _coerce_required_str(rs, field="reasoning")
+
+    c = out.get("confidence")
+    if c is None:
+        out["confidence"] = 0.7
+    else:
+        try:
+            cf = float(c)
+            out["confidence"] = max(0.0, min(1.0, cf))
+        except (TypeError, ValueError):
+            out["confidence"] = 0.7
+
+    if "phase" in out:
+        out["phase"] = _coerce_required_str(out["phase"], field="phase")
+
+    nq = _coerce_optional_str(out.get("new_question"))
+    psq = _coerce_optional_str(out.get("proposed_sub_question"))
+    if nq and str(nq).strip():
+        out["new_question"] = nq
+    elif psq and str(psq).strip():
+        out["new_question"] = psq
+    else:
+        out["new_question"] = None
+
+    nr = _coerce_optional_str(out.get("new_question_rationale"))
+    why = _coerce_optional_str(out.get("why"))
+    if nr and str(nr).strip():
+        out["new_question_rationale"] = nr
+    elif why and str(why).strip():
+        out["new_question_rationale"] = why
+    else:
+        out["new_question_rationale"] = None
+
+    for key in ("detail", "headline"):
+        if key in out:
+            out[key] = _coerce_optional_str(out[key])
+
+    if "needs_more_data" in out:
+        out["needs_more_data"] = bool(out["needs_more_data"])
+
+    return out
+
+
+def _normalize_host_out_dict(obj: dict[str, Any]) -> dict[str, Any]:
     out = dict(obj)
     if "text" in out:
         out["text"] = _coerce_required_str(out["text"], field="text")
     if "phase" in out:
         out["phase"] = _coerce_required_str(out["phase"], field="phase")
-    for key in ("detail", "proposed_sub_question", "why"):
-        if key in out:
-            out[key] = _coerce_optional_str(out[key])
+    if "detail" in out:
+        out["detail"] = _coerce_optional_str(out["detail"])
     return out
 
 
-def _parse_agent_json(raw: str) -> _AgentOut:
+def _parse_panel_agent_json(raw: str) -> _AgentOut:
     s = raw.strip()
     m = _JSON_BLOCK.search(s)
     if not m:
@@ -116,8 +199,19 @@ def _parse_agent_json(raw: str) -> _AgentOut:
     obj = json.loads(m.group(0))
     if not isinstance(obj, dict):
         raise ValueError("Agent output JSON must be an object")
-    obj = _normalize_agent_out_dict(obj)
     return _AgentOut.model_validate(obj)
+
+
+def _parse_host_json(raw: str) -> _HostOut:
+    s = raw.strip()
+    m = _JSON_BLOCK.search(s)
+    if not m:
+        raise ValueError("Host output did not contain a JSON object")
+    obj = json.loads(m.group(0))
+    if not isinstance(obj, dict):
+        raise ValueError("Host output JSON must be an object")
+    obj = _normalize_host_out_dict(obj)
+    return _HostOut.model_validate(obj)
 
 
 def _parse_moderator_json(raw: str) -> _ModeratorOut:
@@ -130,7 +224,8 @@ def _parse_moderator_json(raw: str) -> _ModeratorOut:
 
 
 def _discussion_markdown(out: _AgentOut) -> str:
-    parts = [f"**{out.phase}**\n\n{out.text}"]
+    lead = f"**{out.headline}**\n\n" if (out.headline and out.headline.strip()) else ""
+    parts = [f"{lead}**{out.phase}**\n\n{out.insight}"]
     if out.detail:
         parts.append(f"\n\n_{out.detail}_")
     return "".join(parts)
@@ -308,7 +403,13 @@ def _discussion_user_prompt(
 
 def _moderator_user_prompt(*, ctx: dict[str, Any], analyst: _AgentOut, turns: list[DiscussionTurn]) -> str:
     compact_round: list[dict[str, Any]] = [
-        {"round": t.round_index, "role": t.role, "text": t.output.text, "detail": t.output.detail}
+        {
+            "round": t.round_index,
+            "role": t.role,
+            "insight": t.output.insight,
+            "confidence": t.output.confidence,
+            "detail": t.output.detail,
+        }
         for t in turns
     ]
     return (
@@ -384,10 +485,10 @@ async def _run_role_call(
     prior: dict[str, _AgentOut],
 ) -> _AgentOut:
     user_content = _human_prompt(ctx=ctx, prior=prior)
-    return await _run_agent_json(settings, role, system_prompt, user_content)
+    return await _run_panel_agent_json(settings, role, system_prompt, user_content)
 
 
-async def _run_agent_json(
+async def _run_panel_agent_json(
     settings: Settings,
     role_label: str,
     system_prompt: str,
@@ -403,7 +504,36 @@ async def _run_agent_json(
         )
         if not text:
             raise ValueError(f"Empty streamed content from agent {role_label}")
-        return _parse_agent_json(text)
+        return _parse_panel_agent_json(text)
+    except (ValueError, json.JSONDecodeError) as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"LLM agent {role_label} failed: {e}",
+        ) from e
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"LLM agent {role_label} failed: {e}",
+        ) from e
+
+
+async def _run_host_json(
+    settings: Settings,
+    role_label: str,
+    system_prompt: str,
+    user_content: str,
+) -> _HostOut:
+    try:
+        text = await _stream_llm_text(
+            settings=settings,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+            ],
+        )
+        if not text:
+            raise ValueError(f"Empty streamed content from agent {role_label}")
+        return _parse_host_json(text)
     except (ValueError, json.JSONDecodeError) as e:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -514,7 +644,7 @@ async def _run_llm_agents_linear(
         elif role in ("MARKETING", "FINANCE", "CHALLENGER"):
             await _sse_discussion_turn(on_progress, role, 1, out)
         if role == "CHALLENGER" and allow_sql_approval_pause:
-            pq = (out.proposed_sub_question or "").strip()
+            pq = (out.new_question or "").strip()
             if (
                 out.needs_more_data
                 and pq
@@ -539,7 +669,7 @@ async def _run_llm_agents_linear(
                     host_plan=host_plan,
                     analyst_plan=analyst_plan,
                     proposed_sub_question=pq,
-                    rationale=out.why,
+                    rationale=out.new_question_rationale,
                 )
 
     discussion = discussion_state_from_legacy_prior(prior)
@@ -548,7 +678,7 @@ async def _run_llm_agents_linear(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to build discussion state after linear agent run",
         )
-    host_out = await _run_agent_json(
+    host_out = await _run_host_json(
         settings,
         "HOST",
         system_prompt_host_composer(),
@@ -581,7 +711,7 @@ async def _run_llm_agents_moderated_discussion(
     on_progress: AgentProgressCallback,
 ) -> Union[LlmAgentsComplete, LlmAgentsPaused]:
     pipeline: list[AgentPipelineStep] = []
-    analyst_out = await _run_agent_json(
+    analyst_out = await _run_panel_agent_json(
         settings,
         "ANALYST",
         system_prompt_internal("ANALYST", discussion_aware=False),
@@ -614,14 +744,14 @@ async def _run_llm_agents_moderated_discussion(
                 focus_for_next_round=focus if r > 1 else None,
             )
             pr: PulsecastRole = discussant  # MARKETING|FINANCE|CHALLENGER ⊆ PulsecastRole
-            out = await _run_agent_json(
+            out = await _run_panel_agent_json(
                 settings,
                 role,
                 system_prompt_internal(pr, discussion_aware=True),
                 user_content,
             )
             turns.append(DiscussionTurn(role=discussant, round_index=r, output=out))
-            snippet = (out.detail or out.text or out.phase or "")[:500]
+            snippet = (out.detail or out.insight or out.phase or "")[:500]
             pipeline.append(
                 AgentPipelineStep(
                     id=_agent_id(pr),
@@ -632,7 +762,7 @@ async def _run_llm_agents_moderated_discussion(
             )
             await _sse_discussion_turn(on_progress, role, r, out)
             if role == "CHALLENGER" and allow_sql_approval_pause:
-                pq = (out.proposed_sub_question or "").strip()
+                pq = (out.new_question or "").strip()
                 if (
                     out.needs_more_data
                     and pq
@@ -651,7 +781,7 @@ async def _run_llm_agents_moderated_discussion(
                         host_plan=host_plan,
                         analyst_plan=analyst_plan,
                         proposed_sub_question=pq,
-                        rationale=out.why,
+                        rationale=out.new_question_rationale,
                     )
 
         if r >= max_rounds:
@@ -666,7 +796,7 @@ async def _run_llm_agents_moderated_discussion(
         focus = (mod.focus_for_next_round or "").strip() or None
 
     discussion = DiscussionState(analyst=analyst_out, turns=turns)
-    host_out = await _run_agent_json(
+    host_out = await _run_host_json(
         settings,
         "HOST",
         system_prompt_host_composer(),
@@ -775,7 +905,7 @@ async def run_llm_agents_host_only(
             "Answer using only existing data samples in this context."
         )
 
-    host_out = await _run_agent_json(
+    host_out = await _run_host_json(
         settings,
         "HOST",
         system_prompt_host_composer(),

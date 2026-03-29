@@ -97,15 +97,17 @@ _PERSONA_CHALLENGER = (
     "3. Verdict on sufficiency for `context.question`: can we answer it from current evidence?\n"
     "4. If and ONLY if evidence is clearly insufficient, set needs_more_data true and propose ONE "
     "warehouse-analytics sub-question in plain English (no SQL) that closes the biggest evidence gap. "
-    "Otherwise needs_more_data false and proposed_sub_question / why null.\n\n"
-    "CRITICAL — proposed_sub_question is sent directly to a text-to-SQL engine (not a chat assistant):\n"
-    "- It MUST read like a single business question answerable with one SELECT/WITH: name the measure(s), "
-    "dimensions, and time scope when relevant (same spirit as planning-phase sub-questions).\n"
+    "Otherwise needs_more_data false and new_question / new_question_rationale null.\n\n"
+    "CRITICAL — new_question is sent directly to a text-to-SQL engine (not a chat assistant):\n"
+    "- It MUST be a single sentence in plain business English only: name the measure(s), dimensions, and time "
+    "scope when relevant (same spirit as planning-phase sub_questions). Another system will turn it into SQL — "
+    "you must NEVER output SQL, SQL fragments, pseudo-SQL, table/column lists, or keywords such as SELECT, FROM, "
+    "JOIN, WHERE, GROUP BY, ORDER BY, COUNT(, etc.\n"
     "- Do NOT address the system (no “Can you…”, “Could you…”, “Please confirm…”).\n"
     "- Do NOT ask to verify availability, existence of data, or whether queries are correct — those are "
     "conversational/meta and are invalid here.\n"
     "- If the gap is only “we need someone to check the pipeline” or cannot be phrased as one analytic query, "
-    "set needs_more_data false and explain the limitation in text/detail instead — do not invent a faux "
+    "set needs_more_data false and explain the limitation in insight/detail instead — do not invent a faux "
     "sub-question just to request a follow-up.\n\n"
     "BOUNDARIES:\n"
     "- Do not substitute for ANALYST (no primary trend essay), MARKETING (no campaign narrative), or FINANCE "
@@ -118,38 +120,35 @@ _JSON_HEADER = (
     "You MUST return ONLY valid JSON (no markdown, no backticks, no extra text).\n"
 )
 
-_SCHEMA_INTERNAL = (
-    "Schema:\n"
-    '{ "text": string, "phase": string, "detail": string|null }\n\n'
+_SCHEMA_PANEL_AGENT = (
+    "Schema (same for ANALYST, MARKETING, FINANCE, CHALLENGER):\n"
+    "{\n"
+    '  "insight": string,\n'
+    '  "reasoning": string,\n'
+    '  "confidence": number,\n'
+    '  "phase": string,\n'
+    '  "detail": string|null,\n'
+    '  "headline": string|null,\n'
+    '  "needs_more_data": boolean,\n'
+    '  "new_question": string|null,\n'
+    '  "new_question_rationale": string|null\n'
+    "}\n\n"
     "Rules:\n"
-    "- `text`: 2–6 sentences; actionable internal notes for the Host composer.\n"
-    "- `detail`: optional plain string only (markdown bullets ok); use null if unused — never a JSON object or array.\n"
+    "- insight: 2–6 sentences; actionable internal notes for the Host composer.\n"
+    "- reasoning: 1–4 sentences; how you reached insight from the samples (cite patterns, not repetition of insight).\n"
+    "- confidence: number from 0.0 to 1.0 — your reliability given sample size and grain.\n"
+    "- headline: optional one-line label; null if unused.\n"
+    "- detail: optional plain string only (markdown bullets ok); null if unused — never a JSON object or array.\n"
+    "- ANALYST, MARKETING, FINANCE: needs_more_data MUST be false; new_question and new_question_rationale MUST be null.\n"
+    "- CHALLENGER only: set needs_more_data true ONLY if samples are clearly insufficient for context.question "
+    "(empty, wrong grain, missing critical dimension). If true: new_question MUST be one declarative warehouse "
+    "question (metric + slice + time when needed), same style as planning sub_questions — no SQL, no chat phrasing, "
+    "no “confirm availability” asks; new_question_rationale MUST briefly justify the gap. If needs_more_data is false: "
+    "new_question and new_question_rationale MUST be null.\n"
     "- Do not wrap a whole multi-line block (e.g. intro plus bullet list) in one `_..._`, `*...*`, "
     "`__...__`, or `**...**` pair — UI markdown cannot emphasize across blocks; use `**phrase**` on "
     "short spans or plain bullets only.\n"
     "- Stay within your role boundaries above.\n"
-)
-
-_SCHEMA_CHALLENGER = (
-    "Schema:\n"
-    "{\n"
-    '  "text": string,\n'
-    '  "phase": string,\n'
-    '  "detail": string|null,\n'
-    '  "needs_more_data": boolean,\n'
-    '  "proposed_sub_question": string|null,\n'
-    '  "why": string|null\n'
-    "}\n\n"
-    "Rules:\n"
-    "- Set needs_more_data true ONLY if samples are clearly insufficient for context.question "
-    "(empty, wrong grain, missing critical dimension).\n"
-    "- If true: proposed_sub_question MUST be one declarative warehouse question (metric + slice + time when "
-    "needed), same style as planning sub_questions — no SQL, no chat phrasing, no “confirm availability” asks.\n"
-    "- If false: proposed_sub_question and why MUST be null.\n"
-    "- `detail` must be a plain string or null, never a nested JSON object.\n"
-    "- In `detail`, do not wrap a whole bullet block in one `_..._` / `*...*` / `__...__` / `**...**` "
-    "across line breaks — use short `**` spans or plain bullets.\n"
-    "- Keep text 2–6 sentences.\n"
 )
 
 _HOST_COMPOSER = (
@@ -181,8 +180,9 @@ _HOST_COMPOSER = (
 
 _MODERATOR = (
     "You are the Pulsecast discussion moderator.\n"
-    "You read a compact transcript: ANALYST opening plus Marketing, Finance, and Challenger messages from "
-    "one completed round. You do not see raw execution beyond what agents wrote.\n\n"
+    "You read a compact transcript: ANALYST opening (full JSON) plus Marketing, Finance, and Challenger "
+    "per-turn summaries (insight, confidence, detail) from one completed round. You do not see raw execution "
+    "beyond what agents wrote.\n\n"
     "DECIDE whether another round materially improves insight:\n"
     "1. ROLE UNIQUENESS: Did agents stay in lane and add distinct angles, or echo the same points? Echoing "
     "→ lean toward stop.\n"
@@ -214,8 +214,7 @@ _PERSONAS: dict[InternalPanelRole, str] = {
 def system_prompt_internal(role: InternalPanelRole, *, discussion_aware: bool = False) -> str:
     persona = _PERSONAS[role]
     disc = _DISCUSSION_AWARE if (discussion_aware and role in ("MARKETING", "FINANCE", "CHALLENGER")) else ""
-    schema_block = _SCHEMA_CHALLENGER if role == "CHALLENGER" else _SCHEMA_INTERNAL
-    return persona + _DATA_CONTEXT + disc + _JSON_HEADER + schema_block
+    return persona + _DATA_CONTEXT + disc + _JSON_HEADER + _SCHEMA_PANEL_AGENT
 
 
 def system_prompt_host_composer() -> str:

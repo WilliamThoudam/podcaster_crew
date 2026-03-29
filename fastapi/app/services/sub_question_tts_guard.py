@@ -1,5 +1,7 @@
 """
-Reject Challenger follow-up strings that are conversational/meta for text-to-SQL (not chat).
+Reject follow-up sub-questions that are not plain analytic English for text-to-SQL.
+
+Invalid: conversational/meta asks, pasted SQL / pseudo-SQL, obvious query syntax.
 """
 
 from __future__ import annotations
@@ -32,6 +34,26 @@ _META_ASK = re.compile(
     r"|(\bensure\s+(?:that\s+)?(?:we\s+have|there\s+is)\b)"
 )
 
+# Plain-language sub-questions only: reject pasted/generated SQL (Challenger / edits must not bypass this).
+_SQL_SYNTAX = re.compile(
+    r"(?is)"
+    r"(?:^\s*SELECT\s+|\n\s*SELECT\s+)"
+    r"|(?:\b(?:INSERT|UPDATE|DELETE|MERGE)\s+)"
+    r"|(?:\b(?:INNER|LEFT|RIGHT|FULL|CROSS)\s+JOIN\b)"
+    # JOIN table [alias] ON | JOIN ... USING (avoid English "join our …")
+    r"|(?:\bJOIN\b\s+[A-Za-z_][A-Za-z0-9_.]*\s+(?:[A-Za-z_][A-Za-z0-9_]*\s+)?(?:ON\b|USING\b))"
+    r"|(?:\b(?:GROUP|ORDER)\s+BY\b)"
+    r"|(?:\bHAVING\b)"
+    # join-condition pattern, not the word "on" in prose
+    r"|(?:\bON\s+[A-Za-z_][A-Za-z0-9_.]*\s*\.\s*[A-Za-z_][A-Za-z0-9_.]*\s*=\s*)"
+    r"|(?:\b(?:COUNT|SUM|AVG|MIN|MAX)\s*\()"
+)
+
+
+def _looks_like_sql(text: str) -> bool:
+    return bool(_SQL_SYNTAX.search(text or ""))
+
+
 # At least one token suggesting an analytic slice (warehouse-style question).
 _ANALYTIC_HINT = re.compile(
     r"(?i)\b("
@@ -45,6 +67,8 @@ _ANALYTIC_HINT = re.compile(
 def is_valid_tts_sub_question(text: str) -> bool:
     s = (text or "").strip()
     if len(s) < _MIN_LEN:
+        return False
+    if _looks_like_sql(s):
         return False
     if _META_ASK.search(s):
         return False

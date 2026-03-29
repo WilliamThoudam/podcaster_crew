@@ -5,11 +5,6 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 
-class ChatMessage(BaseModel):
-    role: str = "user"
-    content: str
-
-
 class OpenAIChatMessage(BaseModel):
     role: Literal["system", "user", "assistant"]
     content: str
@@ -40,18 +35,6 @@ class PulsecastChatResumeRequest(BaseModel):
     edited_question: str | None = None
     stream: bool = True
     model: str = "pulsecast-qa"
-
-
-class QARequest(BaseModel):
-    question: str = Field(..., min_length=1, description="Natural language question")
-    user_id: int | None = None
-    user_db_id: int | None = None
-    db_type: str | None = None
-    schema_name: str | None = None
-    session_id: str | None = None
-    model: str | None = None
-    max_nodes: str | None = None
-    is_retry: bool = False
 
 
 class TextToSqlResponse(BaseModel):
@@ -111,25 +94,6 @@ class AgentInsight(BaseModel):
     text: str
 
 
-class QAResponse(BaseModel):
-    generated_sql: str
-    answer: str
-    execute: ExecuteSqlResponse
-    text_to_sql_error: str | None = None
-    pipeline: list[AgentPipelineStep] = Field(
-        default_factory=list,
-        description="Ordered steps matching Host → Analyst → Marketing → Finance → Challenger.",
-    )
-    agent_messages: list[AgentInsight] = Field(
-        default_factory=list,
-        description="Multi-agent narration; Analyst entry mirrors `answer` for SQL-led turns.",
-    )
-    sub_results: list[SubResult] = Field(
-        default_factory=list,
-        description="Results for each planned sub-question (sub_question + generated_sql + execute).",
-    )
-
-
 class OpenAIChatCompletionChoice(BaseModel):
     index: int = 0
     message: OpenAIChatMessage
@@ -180,14 +144,3 @@ class OpenAIModelCard(BaseModel):
 class OpenAIModelsListResponse(BaseModel):
     object: Literal["list"] = "list"
     data: list[OpenAIModelCard]
-
-
-class OpenAIError(BaseModel):
-    message: str
-    type: str = "invalid_request_error"
-    param: str | None = None
-    code: str | None = None
-
-
-class OpenAIErrorResponse(BaseModel):
-    error: OpenAIError

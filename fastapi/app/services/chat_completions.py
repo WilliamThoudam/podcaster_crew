@@ -35,11 +35,17 @@ from app.services.pulsecast_completion_types import (
     CompletionStreamPaused,
     ProgressCallback,
 )
-from app.services.pulsecast_llm_agents import run_llm_agents_host_only
+from app.services.pulsecast_llm_agents import (
+    LlmAgentsPaused,
+    run_llm_agents_after_web_hitl,
+    run_llm_agents_host_only,
+)
 from app.services.pulsecast_resume_store import (
     DuplicateSubQuestionPausedSnapshot,
     PulsecastPausedSnapshot,
     PulsecastPausedSnapshotUnion,
+    WebSearchPausedSnapshot,
+    resume_store,
 )
 from app.services.sub_question_tts_guard import is_valid_tts_sub_question
 from app.services.pulsecast_sse_emit import (
@@ -460,6 +466,80 @@ async def build_resume_duplicate_sub_question_payload(
     )
 
 
+async def build_resume_web_search_payload(
+    *,
+    settings: Settings,
+    snapshot: WebSearchPausedSnapshot,
+    approved: bool,
+    edited_question: str | None,
+    on_progress: ProgressCallback | None = None,
+) -> CompletionStreamOutcome:
+    """After web-search HITL: Serper (if approved), Challenger + Host; may pause again on SQL follow-up."""
+    if not approved:
+        await emit_progress(on_progress, {"type": "web_search_declined"})
+
+    agents_out = await run_llm_agents_after_web_hitl(
+        settings=settings,
+        question=snapshot.question,
+        generated_sql=snapshot.generated_sql,
+        exe=snapshot.primary_exe,
+        deterministic_summary=snapshot.deterministic_summary,
+        sub_results=list(snapshot.sub_results),
+        host_plan=snapshot.host_plan,
+        analyst_plan=snapshot.analyst_plan,
+        discussion=snapshot.discussion,
+        pipeline=snapshot.pipeline,
+        approved=approved,
+        edited_search_query=edited_question,
+        proposed_search_query=snapshot.proposed_search_query,
+        allow_sql_approval_pause=True,
+        on_progress=on_progress,
+    )
+    if isinstance(agents_out, LlmAgentsPaused):
+        snap2 = PulsecastPausedSnapshot(
+            pipeline=agents_out.pipeline,
+            discussion=agents_out.discussion,
+            question=agents_out.question,
+            generated_sql=agents_out.generated_sql,
+            primary_exe=agents_out.primary_exe,
+            deterministic_summary=agents_out.deterministic_summary,
+            sub_results=agents_out.sub_results,
+            host_plan=agents_out.host_plan,
+            analyst_plan=agents_out.analyst_plan,
+            proposed_sub_question=agents_out.proposed_sub_question,
+            rationale=agents_out.rationale,
+            openai_user=snapshot.openai_user,
+        )
+        token = resume_store.issue_token(snap2)
+        await emit_progress(
+            on_progress,
+            {
+                "type": "sql_approval_required",
+                "resume_token": token,
+                "proposed_sub_question": agents_out.proposed_sub_question,
+                "rationale": agents_out.rationale,
+                "pause_kind": "challenger_followup",
+            },
+        )
+        return CompletionStreamPaused(
+            resume_token=token,
+            proposed_sub_question=agents_out.proposed_sub_question,
+            rationale=agents_out.rationale,
+        )
+
+    await emit_progress(on_progress, {"type": "summarizing_started"})
+    await emit_text_chunks(
+        on_progress=on_progress,
+        base_event={},
+        text="Summarizing…",
+        event_type="summarizing_chunk",
+        chunk_size=STREAM_CHUNK_SIZE,
+        delay_s=STREAM_DELAY_S,
+    )
+    await emit_progress(on_progress, {"type": "summarizing_done"})
+    return CompletionStreamComplete(content=agents_out.answer)
+
+
 async def build_resume_dispatcher(
     *,
     settings: Settings,
@@ -467,6 +547,14 @@ async def build_resume_dispatcher(
     req: PulsecastChatResumeRequest,
     on_progress: ProgressCallback | None = None,
 ) -> CompletionStreamOutcome:
+    if isinstance(snapshot, WebSearchPausedSnapshot):
+        return await build_resume_web_search_payload(
+            settings=settings,
+            snapshot=snapshot,
+            approved=req.approved,
+            edited_question=req.edited_question,
+            on_progress=on_progress,
+        )
     if isinstance(snapshot, DuplicateSubQuestionPausedSnapshot):
         return await build_resume_duplicate_sub_question_payload(
             settings=settings,
@@ -521,6 +609,24 @@ async def stream_resume_sse(
 
     try:
         outcome = await task
+    except HTTPException as e:
+        # StreamingResponse may have already sent 200 before the first chunk; never re-raise or Starlette
+        # raises RuntimeError("Caught handled exception, but response already started.").
+        err_payload = json.dumps(
+            {
+                "pulsecast_http_error": True,
+                "status_code": e.status_code,
+                "detail": e.detail,
+            },
+            ensure_ascii=False,
+        )
+        if not started:
+            started = True
+            yield f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), role='assistant')}\n\n"
+        yield f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), content=f'<<PULSECAST_HTTP_ERROR:{err_payload}>>')}\n\n"
+        yield f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), finish_reason='stop')}\n\n"
+        yield "data: [DONE]\n\n"
+        return
     except Exception as e:
         if not started:
             raise

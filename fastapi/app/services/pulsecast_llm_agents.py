@@ -16,6 +16,7 @@ from app.prompts.llm_agents import (
     system_prompt_host_composer_minimal,
     system_prompt_internal,
     system_prompt_moderator,
+    system_prompt_web_crawler,
 )
 from app.models.schemas import (
     AgentInsight,
@@ -31,11 +32,75 @@ from app.services.pulsecast_sse_emit import (
     emit_progress,
     emit_text_chunks,
 )
+from app.clients.serper_search import serper_google_search
 from app.services.sub_question_tts_guard import is_valid_tts_sub_question
 
-PulsecastRole = Literal["HOST", "ANALYST", "MARKETING", "FINANCE", "CHALLENGER"]
-PulsecastAgentId = Literal["host", "analyst", "marketing", "finance", "challenger"]
-DiscussantRole = Literal["MARKETING", "FINANCE", "CHALLENGER"]
+
+def _markdown_escape_cell(s: str) -> str:
+    t = (s or "").replace("\n", " ").replace("\r", " ")
+    return t.replace("|", "\\|")
+
+
+def _serper_results_markdown(
+    *,
+    query: str,
+    results: list[dict[str, Any]] | None,
+    error: str | None,
+    declined: bool,
+) -> str:
+    if declined:
+        return "_User declined web search. Continuing without Serper results._"
+    if error:
+        return f"**Serper error:** {_markdown_escape_cell(error)}"
+    rows = results or []
+    if not rows:
+        return "_No organic search results returned._"
+    lines = [
+        "| # | Title | Snippet | Source |",
+        "| --- | --- | --- | --- |",
+    ]
+    for i, r in enumerate(rows, start=1):
+        title = _markdown_escape_cell(str(r.get("title") or ""))
+        snip = _markdown_escape_cell(str(r.get("snippet") or ""))[:400]
+        link = _markdown_escape_cell(str(r.get("link") or ""))
+        lines.append(f"| {i} | {title} | {snip} | {link} |")
+    return "\n".join(lines)
+
+
+async def _emit_web_search_results_sse(
+    on_progress: AgentProgressCallback,
+    *,
+    query: str | None,
+    markdown_body: str,
+) -> None:
+    """Stream Serper snapshot to UI (Web Crawler lane), same pattern as execute_table_chunk."""
+    if not on_progress:
+        return
+    q = (query or "").strip()
+    base: dict[str, Any] = {"query": q}
+    await emit_progress(on_progress, {**base, "type": "web_search_results_started"})
+    header = f"**Web search (Serper)**\n\n**Query:** {q}\n\n" if q else "**Web search (Serper)**\n\n"
+    await emit_text_chunks(
+        on_progress=on_progress,
+        base_event=base,
+        text=header,
+        event_type="web_search_results_label_chunk",
+        chunk_size=STREAM_CHUNK_SIZE,
+        delay_s=STREAM_DELAY_S,
+    )
+    await emit_text_chunks(
+        on_progress=on_progress,
+        base_event=base,
+        text=markdown_body,
+        event_type="web_search_results_table_chunk",
+        chunk_size=STREAM_CHUNK_SIZE,
+        delay_s=STREAM_DELAY_S,
+    )
+    await emit_progress(on_progress, {**base, "type": "web_search_results_done"})
+
+PulsecastRole = Literal["HOST", "ANALYST", "MARKETING", "FINANCE", "WEB_CRAWLER", "CHALLENGER"]
+PulsecastAgentId = Literal["host", "analyst", "marketing", "finance", "web_crawler", "challenger"]
+DiscussantRole = Literal["MARKETING", "FINANCE", "WEB_CRAWLER", "CHALLENGER"]
 
 AgentProgressCallback = Callable[[dict[str, Any]], Union[Awaitable[None], None]] | None
 
@@ -64,6 +129,9 @@ class _AgentOut(BaseModel):
     needs_more_data: bool = False
     new_question: str | None = None
     new_question_rationale: str | None = None
+    needs_web_search: bool = False
+    search_query: str | None = None
+    web_search_rationale: str | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -177,6 +245,19 @@ def _normalize_panel_agent_out_dict(obj: dict[str, Any]) -> dict[str, Any]:
 
     if "needs_more_data" in out:
         out["needs_more_data"] = bool(out["needs_more_data"])
+
+    if "needs_web_search" in out:
+        out["needs_web_search"] = bool(out["needs_web_search"])
+    sq = _coerce_optional_str(out.get("search_query"))
+    if sq and str(sq).strip():
+        out["search_query"] = sq
+    else:
+        out["search_query"] = None
+    wsr = _coerce_optional_str(out.get("web_search_rationale"))
+    if wsr and str(wsr).strip():
+        out["web_search_rationale"] = wsr
+    else:
+        out["web_search_rationale"] = None
 
     return out
 
@@ -352,6 +433,7 @@ def _context_blob_compact(
     if analyst_plan:
         base["analyst_plan"] = {
             "sub_questions": analyst_plan.sub_questions,
+            "web_sub_questions": analyst_plan.web_sub_questions,
             "rationale": analyst_plan.rationale,
         }
     return base
@@ -445,6 +527,7 @@ def _agent_id(role: PulsecastRole) -> PulsecastAgentId:
         "ANALYST": "analyst",
         "MARKETING": "marketing",
         "FINANCE": "finance",
+        "WEB_CRAWLER": "web_crawler",
         "CHALLENGER": "challenger",
     }[role]
 
@@ -488,6 +571,21 @@ async def _run_role_call(
 ) -> _AgentOut:
     user_content = _human_prompt(ctx=ctx, prior=prior)
     return await _run_panel_agent_json(settings, role, system_prompt, user_content)
+
+
+async def _run_web_crawler_call(
+    *,
+    settings: Settings,
+    ctx: dict[str, Any],
+    prior: dict[str, _AgentOut],
+) -> _AgentOut:
+    return await _run_role_call(
+        settings=settings,
+        role="WEB_CRAWLER",
+        system_prompt=system_prompt_web_crawler(),
+        ctx=ctx,
+        prior=prior,
+    )
 
 
 async def _run_panel_agent_json(
@@ -594,16 +692,36 @@ class LlmAgentsPaused:
     rationale: str | None
 
 
+@dataclass
+class LlmAgentsPausedWebSearch:
+    pipeline: list[AgentPipelineStep]
+    discussion: DiscussionState
+    question: str
+    generated_sql: str
+    primary_exe: ExecuteSqlResponse
+    deterministic_summary: str
+    sub_results: list[SubResult]
+    host_plan: PlanningHostOutput
+    analyst_plan: PlanningAnalystOutput
+    proposed_search_query: str
+    rationale: str | None
+
+
 def discussion_state_from_legacy_prior(prior: dict[str, _AgentOut]) -> DiscussionState | None:
     """Best-effort conversion for snapshot v1 (single pass)."""
     if "ANALYST" not in prior:
         return None
     analyst = prior["ANALYST"]
     turns: list[DiscussionTurn] = []
-    for role in ("MARKETING", "FINANCE", "CHALLENGER"):
+    for role in ("MARKETING", "FINANCE", "WEB_CRAWLER", "CHALLENGER"):
         if role in prior:
             turns.append(DiscussionTurn(role=role, round_index=1, output=prior[role]))
     return DiscussionState(analyst=analyst, turns=turns)
+
+
+def _serper_configured(settings: Settings) -> bool:
+    """Web search HITL is only offered when Serper can run after approval."""
+    return bool((settings.serper_api_key or "").strip())
 
 
 async def _run_llm_agents_minimal(
@@ -629,8 +747,8 @@ async def _run_llm_agents_minimal(
         )
     )
     await _sse_discussion_analyst(on_progress, analyst_out)
-    for role in ("MARKETING", "FINANCE", "CHALLENGER"):
-        pr: PulsecastRole = role  # MARKETING|FINANCE|CHALLENGER
+    for role in ("MARKETING", "FINANCE", "WEB_CRAWLER", "CHALLENGER"):
+        pr: PulsecastRole = role  # MARKETING|FINANCE|WEB_CRAWLER|CHALLENGER
         pipeline.append(
             AgentPipelineStep(
                 id=_agent_id(pr),
@@ -670,19 +788,28 @@ async def _run_llm_agents_linear(
     ctx: dict[str, Any],
     allow_sql_approval_pause: bool,
     on_progress: AgentProgressCallback,
-) -> Union[LlmAgentsComplete, LlmAgentsPaused]:
-    internal_roles: list[PulsecastRole] = ["ANALYST", "MARKETING", "FINANCE", "CHALLENGER"]
+) -> Union[LlmAgentsComplete, LlmAgentsPaused, LlmAgentsPausedWebSearch]:
+    internal_roles: list[PulsecastRole] = [
+        "ANALYST",
+        "MARKETING",
+        "FINANCE",
+        "WEB_CRAWLER",
+        "CHALLENGER",
+    ]
     prior: dict[str, _AgentOut] = {}
     pipeline: list[AgentPipelineStep] = []
 
     for role in internal_roles:
-        out = await _run_role_call(
-            settings=settings,
-            role=role,
-            system_prompt=system_prompt_internal(role, discussion_aware=False),
-            ctx=ctx,
-            prior=prior,
-        )
+        if role == "WEB_CRAWLER":
+            out = await _run_web_crawler_call(settings=settings, ctx=ctx, prior=prior)
+        else:
+            out = await _run_role_call(
+                settings=settings,
+                role=role,
+                system_prompt=system_prompt_internal(role, discussion_aware=False),
+                ctx=ctx,
+                prior=prior,
+            )
         prior[role] = out
         pipeline.append(
             AgentPipelineStep(
@@ -694,8 +821,30 @@ async def _run_llm_agents_linear(
         )
         if role == "ANALYST":
             await _sse_discussion_analyst(on_progress, out)
-        elif role in ("MARKETING", "FINANCE", "CHALLENGER"):
+        elif role in ("MARKETING", "FINANCE", "WEB_CRAWLER", "CHALLENGER"):
             await _sse_discussion_turn(on_progress, role, 1, out)
+        if role == "WEB_CRAWLER" and _serper_configured(settings):
+            sq = (out.search_query or "").strip()
+            if out.needs_web_search and sq and host_plan is not None and analyst_plan is not None:
+                ds = discussion_state_from_legacy_prior(prior)
+                if ds is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail="Failed to build discussion state for web search pause",
+                    )
+                return LlmAgentsPausedWebSearch(
+                    pipeline=pipeline,
+                    discussion=ds,
+                    question=question,
+                    generated_sql=generated_sql,
+                    primary_exe=exe,
+                    deterministic_summary=deterministic_summary,
+                    sub_results=sr_list,
+                    host_plan=host_plan,
+                    analyst_plan=analyst_plan,
+                    proposed_search_query=sq,
+                    rationale=out.web_search_rationale,
+                )
         if role == "CHALLENGER" and allow_sql_approval_pause:
             pq = (out.new_question or "").strip()
             if (
@@ -762,7 +911,7 @@ async def _run_llm_agents_moderated_discussion(
     allow_sql_approval_pause: bool,
     max_rounds: int,
     on_progress: AgentProgressCallback,
-) -> Union[LlmAgentsComplete, LlmAgentsPaused]:
+) -> Union[LlmAgentsComplete, LlmAgentsPaused, LlmAgentsPausedWebSearch]:
     pipeline: list[AgentPipelineStep] = []
     analyst_out = await _run_panel_agent_json(
         settings,
@@ -782,48 +931,97 @@ async def _run_llm_agents_moderated_discussion(
     turns: list[DiscussionTurn] = []
     focus: str | None = None
 
+    async def _run_one_discussant(
+        *,
+        discussant: DiscussantRole,
+        round_index: int,
+    ) -> LlmAgentsPaused | None:
+        nonlocal turns
+        user_content = _discussion_user_prompt(
+            ctx=ctx,
+            analyst=analyst_out,
+            turns=turns,
+            role=discussant,
+            round_index=round_index,
+            focus_for_next_round=focus if round_index > 1 else None,
+        )
+        pr: PulsecastRole = discussant
+        out = await _run_panel_agent_json(
+            settings,
+            pr,
+            system_prompt_internal(pr, discussion_aware=True),
+            user_content,
+        )
+        turns.append(DiscussionTurn(role=discussant, round_index=round_index, output=out))
+        snippet = (out.detail or out.insight or out.phase or "")[:500]
+        pipeline.append(
+            AgentPipelineStep(
+                id=_agent_id(pr),
+                status="completed",
+                phase=f"round_{round_index}",
+                detail=snippet or None,
+            )
+        )
+        await _sse_discussion_turn(on_progress, pr, round_index, out)
+        if discussant == "CHALLENGER" and allow_sql_approval_pause:
+            pq = (out.new_question or "").strip()
+            if (
+                out.needs_more_data
+                and pq
+                and is_valid_tts_sub_question(pq)
+                and host_plan is not None
+                and analyst_plan is not None
+            ):
+                return LlmAgentsPaused(
+                    pipeline=pipeline,
+                    discussion=DiscussionState(analyst=analyst_out, turns=list(turns)),
+                    question=question,
+                    generated_sql=generated_sql,
+                    primary_exe=exe,
+                    deterministic_summary=deterministic_summary,
+                    sub_results=sr_list,
+                    host_plan=host_plan,
+                    analyst_plan=analyst_plan,
+                    proposed_sub_question=pq,
+                    rationale=out.new_question_rationale,
+                )
+        return None
+
     for r in range(1, max_rounds + 1):
         if on_progress:
             await emit_progress(on_progress, {"type": "discussion_round_started", "round": r})
         round_slice_start = len(turns)
-        for role in ("MARKETING", "FINANCE", "CHALLENGER"):
-            discussant: DiscussantRole = role
-            user_content = _discussion_user_prompt(
-                ctx=ctx,
-                analyst=analyst_out,
-                turns=turns,
-                role=discussant,
-                round_index=r,
-                focus_for_next_round=focus if r > 1 else None,
-            )
-            pr: PulsecastRole = discussant  # MARKETING|FINANCE|CHALLENGER ⊆ PulsecastRole
-            out = await _run_panel_agent_json(
-                settings,
-                role,
-                system_prompt_internal(pr, discussion_aware=True),
-                user_content,
-            )
-            turns.append(DiscussionTurn(role=discussant, round_index=r, output=out))
-            snippet = (out.detail or out.insight or out.phase or "")[:500]
+        if r == 1:
+            hitl = await _run_one_discussant(discussant="MARKETING", round_index=r)
+            if hitl is not None:
+                return hitl
+            hitl = await _run_one_discussant(discussant="FINANCE", round_index=r)
+            if hitl is not None:
+                return hitl
+            prior_wc: dict[str, _AgentOut] = {"ANALYST": analyst_out}
+            for t in turns:
+                prior_wc[t.role] = t.output
+            wc_out = await _run_web_crawler_call(settings=settings, ctx=ctx, prior=prior_wc)
+            turns.append(DiscussionTurn(role="WEB_CRAWLER", round_index=r, output=wc_out))
+            wc_snippet = (wc_out.detail or wc_out.insight or wc_out.phase or "")[:500]
             pipeline.append(
                 AgentPipelineStep(
-                    id=_agent_id(pr),
+                    id=_agent_id("WEB_CRAWLER"),
                     status="completed",
                     phase=f"round_{r}",
-                    detail=snippet or None,
+                    detail=wc_snippet or None,
                 )
             )
-            await _sse_discussion_turn(on_progress, role, r, out)
-            if role == "CHALLENGER" and allow_sql_approval_pause:
-                pq = (out.new_question or "").strip()
+            await _sse_discussion_turn(on_progress, "WEB_CRAWLER", r, wc_out)
+            if _serper_configured(settings):
+                sq = (wc_out.search_query or "").strip()
                 if (
-                    out.needs_more_data
-                    and pq
-                    and is_valid_tts_sub_question(pq)
+                    wc_out.needs_web_search
+                    and sq
                     and host_plan is not None
                     and analyst_plan is not None
                 ):
-                    return LlmAgentsPaused(
+                    return LlmAgentsPausedWebSearch(
                         pipeline=pipeline,
                         discussion=DiscussionState(analyst=analyst_out, turns=list(turns)),
                         question=question,
@@ -833,9 +1031,17 @@ async def _run_llm_agents_moderated_discussion(
                         sub_results=sr_list,
                         host_plan=host_plan,
                         analyst_plan=analyst_plan,
-                        proposed_sub_question=pq,
-                        rationale=out.new_question_rationale,
+                        proposed_search_query=sq,
+                        rationale=wc_out.web_search_rationale,
                     )
+            hitl = await _run_one_discussant(discussant="CHALLENGER", round_index=r)
+            if hitl is not None:
+                return hitl
+        else:
+            for role in ("MARKETING", "FINANCE", "CHALLENGER"):
+                hitl = await _run_one_discussant(discussant=role, round_index=r)
+                if hitl is not None:
+                    return hitl
 
         if r >= max_rounds:
             break
@@ -878,11 +1084,12 @@ async def run_llm_agents(
     analyst_plan: PlanningAnalystOutput | None = None,
     allow_sql_approval_pause: bool = True,
     on_progress: AgentProgressCallback = None,
-) -> Union[LlmAgentsComplete, LlmAgentsPaused]:
+) -> Union[LlmAgentsComplete, LlmAgentsPaused, LlmAgentsPausedWebSearch]:
     """
     Run internal enrichment, then HOST.
-    Routing uses host_plan.discussion_depth: minimal (ANALYST→HOST), linear (single M→F→C pass), or moderated
+    Routing uses host_plan.discussion_depth: minimal (ANALYST→HOST), linear (single M→F→WC→C pass), or moderated
     (multi-round when pulsecast_discussion_enabled). If moderated but discussion is globally disabled, uses linear.
+    If depth is minimal but analyst_plan.web_sub_questions is non-empty, depth is treated as linear so WEB_CRAWLER runs.
     If CHALLENGER requests more data and allow_sql_approval_pause, return LlmAgentsPaused (no HOST yet) — not on minimal path.
     """
     sr_list = list(sub_results) if sub_results is not None else []
@@ -898,6 +1105,15 @@ async def run_llm_agents(
     )
 
     depth = host_plan.discussion_depth if host_plan else "moderated"
+    # Minimal path skips Marketing/Finance/WEB_CRAWLER/Challenger. Planning may still put public-web intents
+    # in web_sub_questions — those require WEB_CRAWLER (and optional Serper HITL), so use at least linear.
+    if (
+        depth == "minimal"
+        and analyst_plan
+        and analyst_plan.web_sub_questions
+    ):
+        depth = "linear"
+
     if depth == "minimal":
         return await _run_llm_agents_minimal(
             settings=settings,
@@ -983,6 +1199,144 @@ async def run_llm_agents_host_only(
             detail=host_out.detail,
         ),
     ]
+    return LlmAgentsComplete(
+        answer=host_out.text,
+        pipeline=pipeline_out,
+        messages=[AgentInsight(role="HOST", text=host_out.text)],
+    )
+
+
+async def run_llm_agents_after_web_hitl(
+    *,
+    settings: Settings,
+    question: str,
+    generated_sql: str,
+    exe: ExecuteSqlResponse,
+    deterministic_summary: str,
+    sub_results: list[SubResult],
+    host_plan: PlanningHostOutput,
+    analyst_plan: PlanningAnalystOutput,
+    discussion: DiscussionState,
+    pipeline: list[AgentPipelineStep],
+    approved: bool,
+    edited_search_query: str | None,
+    proposed_search_query: str,
+    allow_sql_approval_pause: bool,
+    on_progress: AgentProgressCallback = None,
+) -> Union[LlmAgentsComplete, LlmAgentsPaused]:
+    """After web-search HITL: Serper (if approved), then CHALLENGER + HOST."""
+    ctx = _context_blob_compact(
+        question=question,
+        generated_sql=generated_sql,
+        exe=exe,
+        deterministic_summary=deterministic_summary,
+        sub_results=sub_results,
+        host_plan=host_plan,
+        analyst_plan=analyst_plan,
+    )
+    if approved:
+        q = (edited_search_query or "").strip() or (proposed_search_query or "").strip()
+        if q:
+            try:
+                results = await serper_google_search(settings=settings, query=q, num=8)
+                ctx["web_search_query_used"] = q
+                ctx["web_search_results"] = results
+            except Exception as e:
+                ctx["web_search_error"] = str(e)
+                ctx["web_search_query_attempted"] = q
+    else:
+        ctx["user_declined_web_search"] = True
+        ctx["hitl_note"] = (
+            "The user declined to run a public web search. Answer using warehouse samples and "
+            "prior panel notes only; do not imply external web results were retrieved."
+        )
+
+    if not approved:
+        _md = _serper_results_markdown(query="", results=None, error=None, declined=True)
+        await _emit_web_search_results_sse(on_progress, query=None, markdown_body=_md)
+    else:
+        _q = (edited_search_query or "").strip() or (proposed_search_query or "").strip()
+        _err = ctx.get("web_search_error")
+        if _err:
+            _md = _serper_results_markdown(query=_q, results=None, error=str(_err), declined=False)
+        elif not _q:
+            _md = "_No search query was available after approval._"
+        else:
+            _md = _serper_results_markdown(
+                query=_q,
+                results=ctx.get("web_search_results"),
+                error=None,
+                declined=False,
+            )
+        await _emit_web_search_results_sse(on_progress, query=_q or None, markdown_body=_md)
+
+    prior: dict[str, _AgentOut] = {"ANALYST": discussion.analyst}
+    for t in discussion.turns:
+        prior[t.role] = t.output
+
+    ch_out = await _run_role_call(
+        settings=settings,
+        role="CHALLENGER",
+        system_prompt=system_prompt_internal("CHALLENGER", discussion_aware=False),
+        ctx=ctx,
+        prior=prior,
+    )
+    pipeline_out = [
+        *pipeline,
+        AgentPipelineStep(
+            id=_agent_id("CHALLENGER"),
+            status="completed",
+            phase=ch_out.phase,
+            detail=ch_out.detail,
+        ),
+    ]
+    await _sse_discussion_turn(on_progress, "CHALLENGER", 1, ch_out)
+
+    if allow_sql_approval_pause:
+        pq = (ch_out.new_question or "").strip()
+        if (
+            ch_out.needs_more_data
+            and pq
+            and is_valid_tts_sub_question(pq)
+        ):
+            turns_final = [
+                *discussion.turns,
+                DiscussionTurn(role="CHALLENGER", round_index=1, output=ch_out),
+            ]
+            return LlmAgentsPaused(
+                pipeline=pipeline_out,
+                discussion=DiscussionState(analyst=discussion.analyst, turns=turns_final),
+                question=question,
+                generated_sql=generated_sql,
+                primary_exe=exe,
+                deterministic_summary=deterministic_summary,
+                sub_results=sub_results,
+                host_plan=host_plan,
+                analyst_plan=analyst_plan,
+                proposed_sub_question=pq,
+                rationale=ch_out.new_question_rationale,
+            )
+
+    turns_final = [
+        *discussion.turns,
+        DiscussionTurn(role="CHALLENGER", round_index=1, output=ch_out),
+    ]
+    discussion_final = DiscussionState(analyst=discussion.analyst, turns=turns_final)
+
+    host_out = await _run_host_json(
+        settings,
+        "HOST",
+        system_prompt_host_composer(),
+        _host_user_prompt(ctx=ctx, discussion=discussion_final),
+    )
+    pipeline_out.append(
+        AgentPipelineStep(
+            id=_agent_id("HOST"),
+            status="completed",
+            phase=host_out.phase,
+            detail=host_out.detail,
+        )
+    )
     return LlmAgentsComplete(
         answer=host_out.text,
         pipeline=pipeline_out,

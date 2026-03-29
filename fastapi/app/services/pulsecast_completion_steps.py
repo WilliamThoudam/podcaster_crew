@@ -22,7 +22,11 @@ from app.services.pulsecast_completion_types import (
     CompletionStreamPaused,
     ProgressCallback,
 )
-from app.services.pulsecast_llm_agents import LlmAgentsPaused, run_llm_agents
+from app.services.pulsecast_llm_agents import (
+    LlmAgentsPaused,
+    LlmAgentsPausedWebSearch,
+    run_llm_agents,
+)
 from app.services.pulsecast_planning import (
     run_analyst_planner,
     run_duplicate_sub_question_rephrase,
@@ -31,6 +35,7 @@ from app.services.pulsecast_planning import (
 from app.services.pulsecast_resume_store import (
     DuplicateSubQuestionPausedSnapshot,
     PulsecastPausedSnapshot,
+    WebSearchPausedSnapshot,
     resume_store,
 )
 from app.services.pulsecast_sse_emit import (
@@ -102,11 +107,15 @@ async def phase_planning(
         question=question,
         host=host_plan,
     )
-    total_sub = len(analyst_plan.sub_questions)
+    sql_n = len(analyst_plan.sub_questions)
+    web_n = len(analyst_plan.web_sub_questions)
+    total_sub = sql_n + web_n
     await emit_progress(on_progress, {"type": "planned_sub_questions_started", "total": total_sub})
-    plan_md = "To answer this, I will break it down into steps:\n\n" + "\n".join(
-        f"{i + 1}. {sq}" for i, sq in enumerate(analyst_plan.sub_questions)
-    )
+    plan_lines = [f"{i + 1}. {sq}" for i, sq in enumerate(analyst_plan.sub_questions)]
+    base_idx = len(plan_lines)
+    for j, wq in enumerate(analyst_plan.web_sub_questions):
+        plan_lines.append(f"{base_idx + j + 1}. [Web] {wq}")
+    plan_md = "To answer this, I will break it down into steps:\n\n" + "\n".join(plan_lines)
     await emit_text_chunks(
         on_progress=on_progress,
         base_event={"total": total_sub},
@@ -466,6 +475,37 @@ async def phase_agents_finalize(
         analyst_plan=analyst_plan,
         on_progress=on_progress,
     )
+    if isinstance(agents_out, LlmAgentsPausedWebSearch):
+        snap = WebSearchPausedSnapshot(
+            pipeline=agents_out.pipeline,
+            discussion=agents_out.discussion,
+            question=agents_out.question,
+            generated_sql=agents_out.generated_sql,
+            primary_exe=agents_out.primary_exe,
+            deterministic_summary=agents_out.deterministic_summary,
+            sub_results=agents_out.sub_results,
+            host_plan=agents_out.host_plan,
+            analyst_plan=agents_out.analyst_plan,
+            proposed_search_query=agents_out.proposed_search_query,
+            rationale=agents_out.rationale,
+            openai_user=req.user,
+        )
+        token = resume_store.issue_token(snap)
+        await emit_progress(
+            on_progress,
+            {
+                "type": "web_search_approval_required",
+                "resume_token": token,
+                "proposed_search_query": agents_out.proposed_search_query,
+                "rationale": agents_out.rationale,
+                "pause_kind": "web_search",
+            },
+        )
+        return CompletionStreamPaused(
+            resume_token=token,
+            proposed_sub_question=agents_out.proposed_search_query,
+            rationale=agents_out.rationale,
+        )
     if isinstance(agents_out, LlmAgentsPaused):
         snap = PulsecastPausedSnapshot(
             pipeline=agents_out.pipeline,

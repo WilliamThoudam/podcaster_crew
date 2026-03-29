@@ -18,6 +18,7 @@ export type PodcastRole =
   | 'ANALYST'
   | 'MARKETING'
   | 'FINANCE'
+  | 'WEB_CRAWLER'
   | 'CHALLENGER'
 
 export type PodcastLine = {

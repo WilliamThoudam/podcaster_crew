@@ -34,6 +34,25 @@ _META_ASK = re.compile(
     r"|(\bensure\s+(?:that\s+)?(?:we\s+have|there\s+is)\b)"
 )
 
+# Gaps that are not answerable from a typical mart (news, recalls-as-media, comms, PR). Second-line guard
+# after model prompt rules — keeps Challenger/HITL from opening SQL approval for faux warehouse asks.
+_NON_WAREHOUSE_ASK = re.compile(
+    r"(?ix)"
+    r"(\bnews\s+(?:article|articles|coverage|story|stories|headline|headlines)\b)"
+    r"|(\bmedia\s+coverage\b)"
+    r"|(\bpress\s+(?:release|releases|coverage)\b)"
+    r"|(\bpublic\s+(?:announcement|statement)\b)"
+    r"|(\bproduct\s+recall\b|\bsafety\s+recall\b|\brecall\s+(?:notice|announcement|campaign)\b)"
+    r"|(\b(?:fda|nhtsa|cpsc)\s+recall\b)"
+    r"|(\bregulatory\s+(?:filing|announcement|action)\b)"
+    r"|(\bcompetitor\s+(?:news|announcement|press)\b)"
+    r"|(\binternal\s+comm(?:s|unications)?\b)"
+    r"|(\bslack\b|\bemail\s+thread\b|\bteams\s+message\b)"
+    r"|(\bpr\s+event\b|\bpress\s+event\b)"
+    r"|(\bweb\s+search\s+results?\b)"
+    r"|(\b(?:fetch|list|pull)\s+(?:the\s+)?(?:latest\s+)?(?:news|articles|press)\b)"
+)
+
 # Plain-language sub-questions only: reject pasted/generated SQL (Challenger / edits must not bypass this).
 _SQL_SYNTAX = re.compile(
     r"(?is)"
@@ -64,6 +83,11 @@ _ANALYTIC_HINT = re.compile(
 )
 
 
+def looks_like_non_warehouse_sub_question(text: str) -> bool:
+    """True if the text reads like news/comms/PR/recall asks, not a warehouse mart query."""
+    return bool(_NON_WAREHOUSE_ASK.search(text or ""))
+
+
 def is_valid_tts_sub_question(text: str) -> bool:
     s = (text or "").strip()
     if len(s) < _MIN_LEN:
@@ -71,6 +95,8 @@ def is_valid_tts_sub_question(text: str) -> bool:
     if _looks_like_sql(s):
         return False
     if _META_ASK.search(s):
+        return False
+    if looks_like_non_warehouse_sub_question(s):
         return False
     # Short strings that passed meta filter should still smell like analytics.
     if len(s) < 48 and not _ANALYTIC_HINT.search(s):

@@ -1,7 +1,7 @@
 # Pulsecast API (OpenAI-compatible)
 
 OpenAI-compatible chat API backed by the Pulsecast QA pipeline:
-text-to-SQL service + SQL validation + execute_sql + 5 LLM agent reasoning.
+text-to-SQL service + SQL validation + execute_sql + multi-agent reasoning (including optional Web Crawler + Serper after user approval).
 
 The upstream **text-to-SQL** service (`TEXT_TO_SQL_BASE_URL`, often `/v1/chat/completions`) uses an OpenAI-shaped payload but expects a **single warehouse-style analytic question** (measure, dimensions, time scope)—not conversational asks like “confirm data availability.” Challenger follow-up proposals are written and filtered (`app/services/sub_question_tts_guard.py`) so HITL only offers text-to-SQL–safe sub-questions.
 
@@ -27,6 +27,7 @@ Optional: copy or symlink the repo root `.env` here, or set variables in your en
 - `DEFAULT_USER_ID`, `DEFAULT_USER_DB_ID`, `DEFAULT_DB_TYPE`, `DEFAULT_SCHEMA_NAME`, `DEFAULT_MODEL`, `DEFAULT_MAX_NODES`
 - `CORS_ORIGINS` (comma-separated, default includes `http://localhost:5173`)
 - `HTTP_TIMEOUT_SECONDS`
+- `SERPER_API_KEY` (optional; enables Web Crawler → user-approved Serper `google.serper.dev` search)
 
 ## Run
 

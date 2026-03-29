@@ -32,6 +32,7 @@ const QA_INSIGHT_STYLE: Record<PodcastRole, { emoji: string; color: string }> = 
   ANALYST: { emoji: '📊', color: 'var(--analyst)' },
   MARKETING: { emoji: '📣', color: 'var(--marketing)' },
   FINANCE: { emoji: '💰', color: 'var(--finance)' },
+  WEB_CRAWLER: { emoji: '🕸️', color: 'var(--web-crawler)' },
   CHALLENGER: { emoji: '⚖️', color: 'var(--challenger)' },
 }
 
@@ -41,7 +42,8 @@ const ROLE_TO_AGENT_INDEX: Record<PodcastRole, number> = {
   ANALYST: 1,
   MARKETING: 2,
   FINANCE: 3,
-  CHALLENGER: 4,
+  WEB_CRAWLER: 4,
+  CHALLENGER: 5,
 }
 
 function agentStatesForThinkingRole(role: PodcastRole | null): AgentState[] {
@@ -89,12 +91,15 @@ function makePulsecastStreamHandlers(
   let activeExecLabel = ''
   let activeExecGenerating = ''
   let activeExecTable = ''
+  let activeWebSearchMsgId: string | null = null
+  let activeWebSearchLabel = ''
+  let activeWebSearchTable = ''
   let summarizingText = ''
   let discussionAnalystMsgId: string | null = null
   let discussionAnalystText = ''
   let discussionTurnMsgId: string | null = null
   let discussionTurnText = ''
-  let discussionTurnRole: 'MARKETING' | 'FINANCE' | 'CHALLENGER' | null = null
+  let discussionTurnRole: 'MARKETING' | 'FINANCE' | 'WEB_CRAWLER' | 'CHALLENGER' | null = null
   const upsertAnalystMessage = (id: string, text: string) => {
     setQaMessages((m) => {
       const exists = m.some((msg) => msg.id === id)
@@ -148,7 +153,7 @@ function makePulsecastStreamHandlers(
     })
   }
   const upsertRoleMessage = (
-    role: 'MARKETING' | 'FINANCE' | 'CHALLENGER',
+    role: 'MARKETING' | 'FINANCE' | 'WEB_CRAWLER' | 'CHALLENGER',
     id: string,
     text: string,
   ) => {
@@ -175,7 +180,9 @@ function makePulsecastStreamHandlers(
   const onProgress = (event: StreamProgressEvent) => {
     if (
       event.type === 'sql_approval_required' ||
+      event.type === 'web_search_approval_required' ||
       event.type === 'sql_followup_declined' ||
+      event.type === 'web_search_declined' ||
       event.type === 'duplicate_sub_question_skipped'
     ) {
       markThinking(null)
@@ -329,6 +336,61 @@ function makePulsecastStreamHandlers(
           `Result ${event.index}/${event.total}: ${event.sub_question}\n\n${activeExecTable}`,
         )
       }
+      return
+    }
+    if (event.type === 'web_search_results_started') {
+      markThinking('WEB_CRAWLER')
+      activeWebSearchLabel = ''
+      activeWebSearchTable = ''
+      activeWebSearchMsgId = newId()
+      upsertRoleMessage(
+        'WEB_CRAWLER',
+        activeWebSearchMsgId,
+        '_Retrieving Serper results…_',
+      )
+      pinHostDraftAtBottom()
+      return
+    }
+    if (event.type === 'web_search_results_label_chunk') {
+      markThinking('WEB_CRAWLER')
+      if (!activeWebSearchMsgId) {
+        activeWebSearchMsgId = newId()
+      }
+      activeWebSearchLabel += event.chunk
+      upsertRoleMessage(
+        'WEB_CRAWLER',
+        activeWebSearchMsgId,
+        `${activeWebSearchLabel}${activeWebSearchTable}`,
+      )
+      pinHostDraftAtBottom()
+      return
+    }
+    if (event.type === 'web_search_results_table_chunk') {
+      markThinking('WEB_CRAWLER')
+      if (!activeWebSearchMsgId) {
+        activeWebSearchMsgId = newId()
+      }
+      activeWebSearchTable += event.chunk
+      upsertRoleMessage(
+        'WEB_CRAWLER',
+        activeWebSearchMsgId,
+        `${activeWebSearchLabel}${activeWebSearchTable}`,
+      )
+      pinHostDraftAtBottom()
+      return
+    }
+    if (event.type === 'web_search_results_done') {
+      markThinking(null)
+      if (activeWebSearchMsgId) {
+        upsertRoleMessage(
+          'WEB_CRAWLER',
+          activeWebSearchMsgId,
+          `${activeWebSearchLabel}${activeWebSearchTable}`,
+        )
+      }
+      activeWebSearchMsgId = null
+      activeWebSearchLabel = ''
+      activeWebSearchTable = ''
       return
     }
     if (event.type === 'sub_question_retry') {
@@ -706,7 +768,9 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
           const hint =
             pk === 'duplicate_sub_question'
               ? '_The same SQL was generated as for an earlier step._ The analyst suggested a revised sub-question. Use the dialog to **approve** (run SQL; you may edit the wording) or **decline** (skip this step and continue with remaining steps).'
-              : '_Challenger proposed a follow-up analytic query_ (for text-to-SQL). Use the dialog to **approve** (run SQL) or **decline** (answer with current data only).'
+              : pk === 'web_search'
+                ? '_Web Crawler proposed a public web search_ (Serper). Use the dialog to **approve** (run search; you may edit the query) or **decline** (continue without web results).'
+                : '_Challenger proposed a follow-up analytic query_ (for text-to-SQL). Use the dialog to **approve** (run SQL) or **decline** (answer with current data only).'
           if (sid) {
             setQaMessages((m) =>
               m.map((msg) => (msg.id === sid ? { ...msg, text: hint } : msg)),

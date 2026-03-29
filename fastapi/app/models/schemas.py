@@ -68,9 +68,16 @@ class PlanningHostOutput(BaseModel):
 
 
 class PlanningAnalystOutput(BaseModel):
-    """Analyst-produced decomposition into independently SQL-answerable sub-questions."""
+    """Analyst-produced decomposition: warehouse sub_questions (text-to-SQL) plus optional web_sub_questions."""
 
-    sub_questions: list[str] = Field(default_factory=list)
+    sub_questions: list[str] = Field(
+        default_factory=list,
+        description="Mart-style questions executed via text-to-SQL (measures, dimensions, time).",
+    )
+    web_sub_questions: list[str] = Field(
+        default_factory=list,
+        description="Public-web intents (news, recalls, external reports); not sent to text-to-SQL.",
+    )
     rationale: str | None = None
 
 
@@ -85,7 +92,7 @@ class SubResult(BaseModel):
 class AgentPipelineStep(BaseModel):
     """BRD agent lane + phase for Pulsecast Agent Status / future UI sync."""
 
-    id: Literal["host", "analyst", "marketing", "finance", "challenger"]
+    id: Literal["host", "analyst", "marketing", "finance", "web_crawler", "challenger"]
     status: Literal["completed", "skipped"] = "completed"
     phase: str
     detail: str | None = None
@@ -94,7 +101,7 @@ class AgentPipelineStep(BaseModel):
 class AgentInsight(BaseModel):
     """One chat bubble aligned with podcast roles (HOST … CHALLENGER)."""
 
-    role: Literal["HOST", "ANALYST", "MARKETING", "FINANCE", "CHALLENGER"]
+    role: Literal["HOST", "ANALYST", "MARKETING", "FINANCE", "WEB_CRAWLER", "CHALLENGER"]
     text: str
 
 

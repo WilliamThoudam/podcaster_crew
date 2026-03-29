@@ -3,7 +3,13 @@ export type ExecuteSqlPayload = {
   data: Record<string, unknown>[]
 }
 
-export type PulsecastAgentId = 'host' | 'analyst' | 'marketing' | 'finance' | 'challenger'
+export type PulsecastAgentId =
+  | 'host'
+  | 'analyst'
+  | 'marketing'
+  | 'finance'
+  | 'web_crawler'
+  | 'challenger'
 
 export type AgentPipelineStep = {
   id: PulsecastAgentId
@@ -13,7 +19,7 @@ export type AgentPipelineStep = {
 }
 
 export type AgentInsight = {
-  role: 'HOST' | 'ANALYST' | 'MARKETING' | 'FINANCE' | 'CHALLENGER'
+  role: 'HOST' | 'ANALYST' | 'MARKETING' | 'FINANCE' | 'WEB_CRAWLER' | 'CHALLENGER'
   text: string
 }
 
@@ -80,7 +86,7 @@ type StreamCallbacks = {
   onProgress?: (event: StreamProgressEvent) => void
 }
 
-export type SqlHitlPauseKind = 'challenger_followup' | 'duplicate_sub_question'
+export type SqlHitlPauseKind = 'challenger_followup' | 'duplicate_sub_question' | 'web_search'
 
 export type StreamQaOutcome =
   | { kind: 'complete'; answer: string }
@@ -118,6 +124,10 @@ export type StreamProgressEvent =
   | { type: 'execute_generating_chunk'; index: number; total: number; sub_question: string; chunk: string }
   | { type: 'execute_table_chunk'; index: number; total: number; sub_question: string; chunk: string }
   | { type: 'execute_done'; index: number; total: number; sub_question: string }
+  | { type: 'web_search_results_started'; query: string }
+  | { type: 'web_search_results_label_chunk'; query: string; chunk: string }
+  | { type: 'web_search_results_table_chunk'; query: string; chunk: string }
+  | { type: 'web_search_results_done'; query: string }
   | {
       type: 'sub_question_retry'
       index: number
@@ -136,18 +146,18 @@ export type StreamProgressEvent =
   | { type: 'discussion_analyst_done' }
   | {
       type: 'discussion_turn_started'
-      role: 'MARKETING' | 'FINANCE' | 'CHALLENGER'
+      role: 'MARKETING' | 'FINANCE' | 'WEB_CRAWLER' | 'CHALLENGER'
       round: number
     }
   | {
       type: 'discussion_turn_chunk'
-      role: 'MARKETING' | 'FINANCE' | 'CHALLENGER'
+      role: 'MARKETING' | 'FINANCE' | 'WEB_CRAWLER' | 'CHALLENGER'
       round: number
       chunk: string
     }
   | {
       type: 'discussion_turn_done'
-      role: 'MARKETING' | 'FINANCE' | 'CHALLENGER'
+      role: 'MARKETING' | 'FINANCE' | 'WEB_CRAWLER' | 'CHALLENGER'
       round: number
     }
   | { type: 'discussion_moderator'; continue_discussion: boolean; reason: string }
@@ -158,7 +168,15 @@ export type StreamProgressEvent =
       rationale?: string | null
       pause_kind?: SqlHitlPauseKind
     }
+  | {
+      type: 'web_search_approval_required'
+      resume_token: string
+      proposed_search_query: string
+      rationale?: string | null
+      pause_kind?: 'web_search'
+    }
   | { type: 'sql_followup_declined' }
+  | { type: 'web_search_declined' }
   | { type: 'duplicate_sub_question_skipped' }
 
 function apiBase(): string {
@@ -279,6 +297,14 @@ async function consumeSseChatStream(
                 proposed_sub_question: event.proposed_sub_question,
                 rationale: event.rationale ?? null,
                 pause_kind: event.pause_kind ?? 'challenger_followup',
+              }
+            }
+            if (event.type === 'web_search_approval_required') {
+              sqlApproval = {
+                resume_token: event.resume_token,
+                proposed_sub_question: event.proposed_search_query,
+                rationale: event.rationale ?? null,
+                pause_kind: 'web_search',
               }
             }
             callbacks?.onProgress?.(event)

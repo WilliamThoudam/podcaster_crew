@@ -20,7 +20,10 @@ from app.prompts.planning import (
     planning_analyst_system_prompt_strict,
     planning_host_system_prompt,
 )
-from app.services.sub_question_tts_guard import is_valid_tts_sub_question
+from app.services.sub_question_tts_guard import (
+    is_valid_tts_sub_question,
+    looks_like_non_warehouse_sub_question,
+)
 
 
 class _HostOut(BaseModel):
@@ -38,6 +41,7 @@ class _AnalystOut(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     sub_questions: list[str] = Field(default_factory=list)
+    web_sub_questions: list[str] = Field(default_factory=list)
     rationale: str | None = None
 
 
@@ -67,6 +71,25 @@ def _clean_sub_question(text: str) -> str:
     s = s.replace("```sql", "").replace("```", "").strip()
     s = re.sub(r"\s+", " ", s)
     return s
+
+
+_MAX_PLAN_SQL = 6
+_MAX_PLAN_WEB = 4
+
+
+def _dedupe_preserve_order(strings: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for x in strings:
+        t = (x or "").strip()
+        if not t:
+            continue
+        k = t.lower()
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(t)
+    return out
 
 
 def _host_user_prompt(question: str) -> str:
@@ -164,26 +187,46 @@ async def run_analyst_planner(
             detail=f"Analyst planning failed: {e}",
         ) from e
 
-    # Enforce plain-English sub-questions; retry once with stricter instructions if needed.
-    cleaned = [_clean_sub_question(q) for q in out.sub_questions if q and _clean_sub_question(q)]
-    has_sqlish = any(_looks_like_sql(q) for q in cleaned)
+    # Enforce plain-English; retry once with stricter instructions if needed.
+    cleaned_sql = [_clean_sub_question(q) for q in out.sub_questions if q and _clean_sub_question(q)]
+    cleaned_web = [_clean_sub_question(q) for q in (out.web_sub_questions or []) if q and _clean_sub_question(q)]
+    has_sqlish = any(_looks_like_sql(q) for q in cleaned_sql + cleaned_web)
     if has_sqlish:
         try:
             out = await _call_planner(planning_analyst_system_prompt_strict())
-            cleaned = [_clean_sub_question(q) for q in out.sub_questions if q and _clean_sub_question(q)]
+            cleaned_sql = [_clean_sub_question(q) for q in out.sub_questions if q and _clean_sub_question(q)]
+            cleaned_web = [_clean_sub_question(q) for q in (out.web_sub_questions or []) if q and _clean_sub_question(q)]
         except Exception:
             pass
 
-    sub_questions = [q for q in cleaned if not _looks_like_sql(q)]
-    if not sub_questions:
+    sql_pass: list[str] = []
+    moved_to_web: list[str] = []
+    for q in cleaned_sql:
+        if _looks_like_sql(q):
+            continue
+        if looks_like_non_warehouse_sub_question(q):
+            moved_to_web.append(q)
+        else:
+            sql_pass.append(q)
+
+    web_all = _dedupe_preserve_order(moved_to_web + cleaned_web)
+    sql_pass = _dedupe_preserve_order([q for q in sql_pass if not _looks_like_sql(q)])
+    sql_keys = {s.lower() for s in sql_pass}
+    web_filtered = [w for w in web_all if w.lower() not in sql_keys]
+
+    if not sql_pass:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Analyst planning produced no valid plain-English sub_questions",
+            detail=(
+                "Analyst planning produced no warehouse sub_questions; at least one SQL-answerable step is required."
+            ),
         )
-    if len(sub_questions) > 6:
-        sub_questions = sub_questions[:6]
 
-    return PlanningAnalystOutput(sub_questions=sub_questions, rationale=out.rationale)
+    return PlanningAnalystOutput(
+        sub_questions=sql_pass[:_MAX_PLAN_SQL],
+        web_sub_questions=web_filtered[:_MAX_PLAN_WEB],
+        rationale=out.rationale,
+    )
 
 
 def _duplicate_rephrase_user_payload(
@@ -215,6 +258,7 @@ def _duplicate_rephrase_user_payload(
             "discussion_depth": host.discussion_depth,
         },
         "planned_sub_questions": list(analyst_plan.sub_questions),
+        "planned_web_sub_questions": list(analyst_plan.web_sub_questions),
         "prior_sub_question_results": prior,
         "pending_step_index_1_based": pending_index + 1,
         "current_sub_question": original_sub_question,

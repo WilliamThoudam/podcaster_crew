@@ -20,9 +20,14 @@ from app.services.pulsecast_llm_agents import (
 
 PauseKindChallenger = Literal["challenger_followup"]
 PauseKindDuplicate = Literal["duplicate_sub_question"]
+PauseKindWebSearch = Literal["web_search"]
 
-# Union of snapshots stored under a resume_token (Challenger HITL vs duplicate-SQL rephrase HITL).
-PulsecastPausedSnapshotUnion = Union["PulsecastPausedSnapshot", "DuplicateSubQuestionPausedSnapshot"]
+# Union of snapshots stored under a resume_token (Challenger HITL vs duplicate-SQL vs web search HITL).
+PulsecastPausedSnapshotUnion = Union[
+    "PulsecastPausedSnapshot",
+    "DuplicateSubQuestionPausedSnapshot",
+    "WebSearchPausedSnapshot",
+]
 
 
 @dataclass
@@ -146,10 +151,72 @@ class PulsecastPausedSnapshot:
         )
 
 
+@dataclass
+class WebSearchPausedSnapshot:
+    """Resume after web_search_approval_required (HITL) — Serper, then Challenger + Host."""
+
+    pipeline: list[AgentPipelineStep]
+    discussion: DiscussionState
+    question: str
+    generated_sql: str
+    primary_exe: ExecuteSqlResponse
+    deterministic_summary: str
+    sub_results: list[SubResult]
+    host_plan: PlanningHostOutput
+    analyst_plan: PlanningAnalystOutput
+    proposed_search_query: str
+    rationale: str | None
+    openai_user: str | None
+
+    pause_kind: PauseKindWebSearch = "web_search"
+
+    def to_json_dict(self) -> dict[str, Any]:
+        return {
+            "pause_kind": "web_search",
+            "pipeline": [p.model_dump(mode="json") for p in self.pipeline],
+            "analyst": self.discussion.analyst.model_dump(mode="json"),
+            "discussion_turns": [t.model_dump(mode="json") for t in self.discussion.turns],
+            "question": self.question,
+            "generated_sql": self.generated_sql,
+            "primary_exe": self.primary_exe.model_dump(mode="json"),
+            "deterministic_summary": self.deterministic_summary,
+            "sub_results": [sr.model_dump(mode="json") for sr in self.sub_results],
+            "host_plan": self.host_plan.model_dump(mode="json"),
+            "analyst_plan": self.analyst_plan.model_dump(mode="json"),
+            "proposed_search_query": self.proposed_search_query,
+            "rationale": self.rationale,
+            "openai_user": self.openai_user,
+        }
+
+    @staticmethod
+    def from_json_dict(d: dict[str, Any]) -> WebSearchPausedSnapshot:
+        analyst = _AgentOut.model_validate(d["analyst"])
+        turns = [DiscussionTurn.model_validate(x) for x in d["discussion_turns"]]
+        discussion = DiscussionState(analyst=analyst, turns=turns)
+        pipeline = [AgentPipelineStep.model_validate(x) for x in d["pipeline"]]
+        sub_results = [SubResult.model_validate(x) for x in d["sub_results"]]
+        return WebSearchPausedSnapshot(
+            pipeline=pipeline,
+            discussion=discussion,
+            question=d["question"],
+            generated_sql=d["generated_sql"],
+            primary_exe=ExecuteSqlResponse.model_validate(d["primary_exe"]),
+            deterministic_summary=d["deterministic_summary"],
+            sub_results=sub_results,
+            host_plan=PlanningHostOutput.model_validate(d["host_plan"]),
+            analyst_plan=PlanningAnalystOutput.model_validate(d["analyst_plan"]),
+            proposed_search_query=d["proposed_search_query"],
+            rationale=d.get("rationale"),
+            openai_user=d.get("openai_user"),
+        )
+
+
 def deserialize_paused_snapshot(d: dict[str, Any]) -> PulsecastPausedSnapshotUnion:
     kind = d.get("pause_kind")
     if kind == "duplicate_sub_question":
         return DuplicateSubQuestionPausedSnapshot.from_json_dict(d)
+    if kind == "web_search":
+        return WebSearchPausedSnapshot.from_json_dict(d)
     return PulsecastPausedSnapshot.from_json_dict(d)
 
 

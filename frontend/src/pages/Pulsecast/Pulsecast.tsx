@@ -281,6 +281,7 @@ export function Pulsecast() {
                         ['Analyst', 'var(--analyst)', 'rgba(123,97,255,0.08)'],
                         ['Marketing', 'var(--marketing)', 'rgba(255,107,53,0.08)'],
                         ['Finance', 'var(--finance)', 'rgba(0,229,160,0.08)'],
+                        ['Web Crawler', 'var(--web-crawler)', 'rgba(126,184,218,0.12)'],
                         ['Challenger', 'var(--challenger)', 'rgba(245,200,66,0.08)'],
                       ].map(([name, col, bg]) => (
                         <span
@@ -579,12 +580,16 @@ export function Pulsecast() {
           <h3>
             {app.sqlHitlPauseKind === 'duplicate_sub_question'
               ? 'Approve revised sub-question'
-              : 'Approve follow-up SQL'}
+              : app.sqlHitlPauseKind === 'web_search'
+                ? 'Approve web search'
+                : 'Approve follow-up SQL'}
           </h3>
           <p>
             {app.sqlHitlPauseKind === 'duplicate_sub_question'
               ? 'Text-to-SQL matched an earlier step. The analyst suggested a different sub-question. Approve to run it (you may edit), or decline to skip this step and continue the plan.'
-              : 'Challenger proposed a follow-up analytic query for text-to-SQL. Approve to run it, or decline to finish with the data you already have.'}
+              : app.sqlHitlPauseKind === 'web_search'
+                ? 'Web Crawler proposed a public web search (via Serper) to add external context. Approve to run it (you may edit the query), or decline to continue with warehouse data only.'
+                : 'Challenger proposed a follow-up analytic query for text-to-SQL. Approve to run it, or decline to finish with the data you already have.'}
           </p>
           {app.sqlHitlRationale ? (
             <p className="sql-hitl-rationale" style={{ color: 'var(--text2)', fontSize: '0.9rem' }}>
@@ -592,7 +597,7 @@ export function Pulsecast() {
             </p>
           ) : null}
           <label className="section-label" style={{ marginTop: 8 }}>
-            Sub-question (editable)
+            {app.sqlHitlPauseKind === 'web_search' ? 'Search query (editable)' : 'Sub-question (editable)'}
           </label>
           <textarea
             className="interrupt-input"
@@ -608,7 +613,7 @@ export function Pulsecast() {
               disabled={app.qaStreaming}
               onClick={() => app.submitSqlHitl(true)}
             >
-              Approve &amp; run SQL
+              {app.sqlHitlPauseKind === 'web_search' ? 'Approve & search' : 'Approve & run SQL'}
             </button>
             <button
               type="button"

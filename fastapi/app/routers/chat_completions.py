@@ -12,7 +12,12 @@ from app.models.schemas import (
     PulsecastChatResumeRequest,
 )
 from app.services.chat_completions import stream_completion_sse, stream_resume_sse
-from app.services.pulsecast_resume_store import resume_store
+from app.services.pulsecast_resume_store import (
+    DuplicateSubQuestionPausedSnapshot,
+    PulsecastPausedSnapshot,
+    resume_store,
+)
+from app.services.sub_question_tts_guard import is_valid_tts_sub_question
 
 router = APIRouter(tags=["openai-compatible"])
 
@@ -59,6 +64,21 @@ async def chat_completions_resume(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Invalid or expired resume_token",
         )
+    # Reject invalid text-to-SQL sub-questions before StreamingResponse: once the stream is opened the
+    # client may already have received 200, so HTTPException from inside the generator cannot become 422.
+    if body.approved and isinstance(
+        snapshot, (DuplicateSubQuestionPausedSnapshot, PulsecastPausedSnapshot)
+    ):
+        sub_q = (body.edited_question or "").strip() or snapshot.proposed_sub_question
+        if not is_valid_tts_sub_question(sub_q):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={
+                    "invalid_sub_question_for_text_to_sql": True,
+                    "sub_question": sub_q,
+                    "message": "Question must be a single declarative analytics ask; edit and try again.",
+                },
+            )
     return StreamingResponse(
         stream_resume_sse(settings=settings, req=body, snapshot=snapshot),
         media_type="text/event-stream",

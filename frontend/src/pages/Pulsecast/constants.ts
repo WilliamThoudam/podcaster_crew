@@ -67,6 +67,7 @@ export const AGENTS = [
   { name: 'Analyst', emoji: '📊', color: 'var(--analyst)' },
   { name: 'Marketing', emoji: '📣', color: 'var(--marketing)' },
   { name: 'Finance', emoji: '💰', color: 'var(--finance)' },
+  { name: 'Web Crawler', emoji: '🕸️', color: 'var(--web-crawler)' },
   { name: 'Challenger', emoji: '⚖️', color: 'var(--challenger)' },
 ] as const
 

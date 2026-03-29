@@ -69,6 +69,7 @@ function makePulsecastStreamHandlers(
         emoji: QA_INSIGHT_STYLE.ANALYST.emoji,
         color: QA_INSIGHT_STYLE.ANALYST.color,
         text: markdownText,
+        createdAt: Date.now(),
       },
     ])
   }
@@ -103,6 +104,7 @@ function makePulsecastStreamHandlers(
             emoji: QA_INSIGHT_STYLE.ANALYST.emoji,
             color: QA_INSIGHT_STYLE.ANALYST.color,
             text,
+            createdAt: Date.now(),
           },
         ]
       }
@@ -122,6 +124,7 @@ function makePulsecastStreamHandlers(
             emoji: QA_INSIGHT_STYLE.HOST.emoji,
             color: QA_INSIGHT_STYLE.HOST.color,
             text,
+            createdAt: Date.now(),
           },
         ]
       }
@@ -158,6 +161,7 @@ function makePulsecastStreamHandlers(
             emoji: st.emoji,
             color: st.color,
             text,
+            createdAt: Date.now(),
           },
         ]
       }
@@ -428,6 +432,7 @@ function makePulsecastStreamHandlers(
               emoji: QA_INSIGHT_STYLE.HOST.emoji,
               color: QA_INSIGHT_STYLE.HOST.color,
               text: delta,
+              createdAt: Date.now(),
             },
           ]
         }
@@ -649,6 +654,7 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
           emoji: '👤',
           color: 'var(--accent)',
           text: q,
+          createdAt: Date.now(),
         },
       ])
       if (!qaSessionRef.current) {
@@ -699,6 +705,7 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
                 emoji: QA_INSIGHT_STYLE.HOST.emoji,
                 color: QA_INSIGHT_STYLE.HOST.color,
                 text: hint,
+                createdAt: Date.now(),
               },
             ])
           }
@@ -719,6 +726,7 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
               emoji: QA_INSIGHT_STYLE.HOST.emoji,
               color: QA_INSIGHT_STYLE.HOST.color,
               text: result.answer,
+              createdAt: Date.now(),
             },
           ])
         }
@@ -746,6 +754,7 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
             emoji: '⚠️',
             color: 'var(--red)',
             text: msg,
+            createdAt: Date.now(),
           },
         ])
       } finally {
@@ -794,6 +803,7 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
               emoji: QA_INSIGHT_STYLE.HOST.emoji,
               color: QA_INSIGHT_STYLE.HOST.color,
               text: result.answer,
+              createdAt: Date.now(),
             },
           ])
         }
@@ -822,6 +832,7 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
             emoji: '⚠️',
             color: 'var(--red)',
             text: msg,
+            createdAt: Date.now(),
           },
         ])
       } finally {

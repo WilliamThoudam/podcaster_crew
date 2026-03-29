@@ -720,6 +720,7 @@ body::before {
 .qa-messages-inner {
   display: flex;
   flex-direction: column;
+  align-items: flex-start;
   gap: 16px;
 }
 
@@ -765,30 +766,74 @@ body::before {
   }
 }
 
-/* Keep interaction chat plain/minimal (no avatar bubble look). */
+/* Interaction: same bubble layout as Transcript (.chat-bubble / .bubble-text / .sql-block). */
 #screen-interaction .chat-bubble {
-  gap: 0;
-  max-width: 100%;
+  max-width: 720px;
+  animation: fadeUp 0.4s ease;
 }
 
-#screen-interaction .bubble-meta {
-  margin-bottom: 4px;
+#screen-interaction .bubble-body {
+  min-width: 0;
 }
 
-#screen-interaction .bubble-name {
-  font-size: 13px;
-}
-
-#screen-interaction .bubble-text {
-  background: transparent;
-  border: none;
-  border-radius: 0;
+/*
+ * Markdown-emitted SQL uses the same .sql-block shell as Transcript; inner <pre> is flush
+ * so padding/background match the demo (single nested panel, uniform cyan SQL text).
+ */
+.sql-block.markdown-sql-block .markdown-sql-pre-inner {
+  margin: 0;
   padding: 0;
+  background: transparent !important;
+  border: none !important;
+  border-radius: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: 'DM Mono', monospace;
+  font-size: 11px;
+  color: #64b5f6;
+  line-height: 1.6;
 }
 
-#screen-interaction .bubble-text.user-bubble {
+.sql-block.markdown-sql-block .markdown-sql-pre-inner code {
+  font-family: inherit;
+  font-size: inherit;
   background: transparent;
-  border: none;
+  padding: 0;
+  color: inherit;
+}
+
+.sql-block.markdown-sql-block .markdown-sql-pre-inner .hljs-keyword,
+.sql-block.markdown-sql-block .markdown-sql-pre-inner .hljs-built_in,
+.sql-block.markdown-sql-block .markdown-sql-pre-inner .hljs-string,
+.sql-block.markdown-sql-block .markdown-sql-pre-inner .hljs-number,
+.sql-block.markdown-sql-block .markdown-sql-pre-inner .hljs-literal,
+.sql-block.markdown-sql-block .markdown-sql-pre-inner .hljs-comment,
+.sql-block.markdown-sql-block .markdown-sql-pre-inner .hljs-title,
+.sql-block.markdown-sql-block .markdown-sql-pre-inner .hljs-name,
+.sql-block.markdown-sql-block .markdown-sql-pre-inner .hljs-attr {
+  color: #64b5f6 !important;
+}
+
+/* Non-SQL highlighted code in markdown (keep keyword accent). */
+.pulsecast-markdown pre:not(.markdown-sql-pre-inner) .hljs-keyword,
+.pulsecast-markdown pre:not(.markdown-sql-pre-inner) .hljs-selector-tag,
+.pulsecast-markdown pre:not(.markdown-sql-pre-inner) .hljs-section,
+.pulsecast-markdown pre:not(.markdown-sql-pre-inner) .hljs-title {
+  color: var(--accent);
+}
+
+.pulsecast-markdown pre:not(.markdown-sql-pre-inner) .hljs-string,
+.pulsecast-markdown pre:not(.markdown-sql-pre-inner) .hljs-attr {
+  color: #8bc5ff;
+}
+
+.pulsecast-markdown pre:not(.markdown-sql-pre-inner) .hljs-number,
+.pulsecast-markdown pre:not(.markdown-sql-pre-inner) .hljs-literal {
+  color: #c792ea;
+}
+
+.pulsecast-markdown pre:not(.markdown-sql-pre-inner) .hljs-comment {
+  color: var(--text3);
 }
 
 .qa-input-bar {

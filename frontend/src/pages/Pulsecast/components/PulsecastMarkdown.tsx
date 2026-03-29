@@ -1,3 +1,4 @@
+import { Children, isValidElement, type ReactElement, type ReactNode } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeHighlight from 'rehype-highlight'
@@ -5,6 +6,14 @@ import { PulsecastTable } from './PulsecastTable'
 
 type PulsecastMarkdownProps = {
   content: string
+}
+
+function isSqlHighlightedCode(children: ReactNode): boolean {
+  const nodes = Children.toArray(children)
+  if (nodes.length !== 1 || !isValidElement(nodes[0])) return false
+  const el = nodes[0] as ReactElement<{ className?: string }>
+  const cls = el.props?.className
+  return typeof cls === 'string' && (cls.includes('language-sql') || /\bsql\b/i.test(cls))
 }
 
 export function PulsecastMarkdown({ content }: PulsecastMarkdownProps) {
@@ -33,6 +42,26 @@ export function PulsecastMarkdown({ content }: PulsecastMarkdownProps) {
           td({ children, ...props }) {
             return <td {...props}>{children}</td>
           },
+          pre({ children, className, ...props }) {
+            if (isSqlHighlightedCode(children)) {
+              return (
+                <div className="sql-block markdown-sql-block">
+                  <span className="sql-label">SQL QUERY EXECUTED</span>
+                  <pre
+                    {...props}
+                    className={['markdown-sql-pre-inner', className].filter(Boolean).join(' ')}
+                  >
+                    {children}
+                  </pre>
+                </div>
+              )
+            }
+            return (
+              <pre className={className} {...props}>
+                {children}
+              </pre>
+            )
+          },
         }}
       >
         {content}
@@ -40,4 +69,3 @@ export function PulsecastMarkdown({ content }: PulsecastMarkdownProps) {
     </div>
   )
 }
-

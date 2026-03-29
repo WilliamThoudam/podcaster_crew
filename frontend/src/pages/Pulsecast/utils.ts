@@ -4,12 +4,24 @@ export function fmt(s: number): string {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
 }
 
+/** Short wall time for QA transcript headers (e.g. 3:05:42 PM). */
+export function formatQaClock(ms: number): string {
+  return new Date(ms).toLocaleTimeString(undefined, {
+    hour: 'numeric',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: true,
+  })
+}
+
 const COLOR_MAP: Record<string, string> = {
   'var(--host)': '0,212,255',
   'var(--analyst)': '123,97,255',
   'var(--marketing)': '255,107,53',
   'var(--finance)': '0,229,160',
   'var(--challenger)': '245,200,66',
+  'var(--accent)': '0,212,255',
+  'var(--red)': '255,77,109',
 }
 
 export function colorToRgb(cssVar: string): string {

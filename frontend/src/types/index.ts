@@ -35,4 +35,6 @@ export type QaMessage = {
   color: string
   text: string
   sql?: string
+  /** Wall-clock time when the row was created (transcript-style header). */
+  createdAt?: number
 }

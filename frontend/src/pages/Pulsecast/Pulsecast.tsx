@@ -3,6 +3,7 @@ import { Navigate, useNavigate, useParams } from 'react-router-dom'
 import { paths } from '../../routes/paths'
 import { type Screen, isPulsecastScreen } from '../../types'
 import { PODCAST_SCRIPT, TOTAL_MS } from './constants'
+import { formatQaClock } from './utils'
 import { usePulsecastApp } from './hooks/usePulsecastApp'
 import { PulsecastMarkdown } from './components/PulsecastMarkdown'
 import { QaThinkingDots } from './components/QaThinkingDots'
@@ -495,11 +496,24 @@ export function Pulsecast() {
                   <div className="qa-messages-inner" ref={qaMessagesInnerRef}>
                     {app.qaMessages.map((m) => (
                       <div key={m.id} className="chat-bubble">
+                        <div
+                          className="bubble-avatar"
+                          style={{
+                            color: m.color,
+                            borderColor: m.color,
+                            background: `rgba(${app.colorToRgb(m.color)},0.08)`,
+                          }}
+                        >
+                          {m.emoji}
+                        </div>
                         <div className="bubble-body">
                           <div className="bubble-meta">
                             <span className="bubble-name" style={{ color: m.color }}>
                               {m.role}
                             </span>
+                            {m.createdAt != null ? (
+                              <span className="bubble-time">{formatQaClock(m.createdAt)}</span>
+                            ) : null}
                           </div>
                           <div
                             className={`bubble-text${m.kind === 'user' ? ' user-bubble' : ''}`}

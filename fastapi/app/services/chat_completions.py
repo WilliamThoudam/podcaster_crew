@@ -687,6 +687,22 @@ async def stream_completion_sse(
 
     try:
         outcome = await task
+    except HTTPException as e:
+        err_payload = json.dumps(
+            {
+                "pulsecast_http_error": True,
+                "status_code": e.status_code,
+                "detail": e.detail,
+            },
+            ensure_ascii=False,
+        )
+        if not started:
+            started = True
+            yield f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), role='assistant')}\n\n"
+        yield f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), content=f'<<PULSECAST_HTTP_ERROR:{err_payload}>>')}\n\n"
+        yield f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), finish_reason='stop')}\n\n"
+        yield "data: [DONE]\n\n"
+        return
     except Exception as e:
         if not started:
             raise

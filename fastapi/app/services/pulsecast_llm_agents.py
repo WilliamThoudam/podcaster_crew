@@ -200,7 +200,30 @@ def _normalize_panel_agent_out_dict(obj: dict[str, Any]) -> dict[str, Any]:
     elif tx is not None and str(tx).strip():
         out["insight"] = _coerce_required_str(tx, field="text")
     else:
-        raise ValueError("Panel agent JSON must include non-empty insight or legacy text")
+        # Models sometimes omit insight (e.g. WEB_CRAWLER with only search_query). Synthesize from other fields.
+        hl = _coerce_optional_str(out.get("headline"))
+        ph0 = str(out.get("phase") or "").strip()
+        det0 = _coerce_optional_str(out.get("detail"))
+        wsr0 = _coerce_optional_str(out.get("web_search_rationale"))
+        sq0 = _coerce_optional_str(out.get("search_query"))
+        parts: list[str] = []
+        if hl and str(hl).strip():
+            parts.append(str(hl).strip())
+        if ph0:
+            parts.append(ph0)
+        if det0 and str(det0).strip():
+            parts.append(str(det0).strip())
+        if wsr0 and str(wsr0).strip():
+            parts.append(str(wsr0).strip())
+        elif sq0 and str(sq0).strip():
+            parts.append(f"Proposed web search: {sq0.strip()}")
+        if parts:
+            out["insight"] = " ".join(parts)[:8000]
+        else:
+            out["insight"] = (
+                "The model returned structured fields without narrative text; "
+                "downstream steps will use search flags and rationale if present."
+            )
 
     rs = out.get("reasoning")
     if rs is None or not str(rs).strip():
@@ -218,8 +241,11 @@ def _normalize_panel_agent_out_dict(obj: dict[str, Any]) -> dict[str, Any]:
         except (TypeError, ValueError):
             out["confidence"] = 0.7
 
-    if "phase" in out:
-        out["phase"] = _coerce_required_str(out["phase"], field="phase")
+    ph_raw = out.get("phase")
+    if ph_raw is not None and str(ph_raw).strip():
+        out["phase"] = _coerce_required_str(ph_raw, field="phase")
+    else:
+        out["phase"] = "Panel review"
 
     nq = _coerce_optional_str(out.get("new_question"))
     psq = _coerce_optional_str(out.get("proposed_sub_question"))

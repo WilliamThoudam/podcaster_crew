@@ -3,6 +3,8 @@
 OpenAI-compatible chat API backed by the Pulsecast QA pipeline:
 text-to-SQL service + SQL validation + execute_sql + 5 LLM agent reasoning.
 
+The upstream **text-to-SQL** service (`TEXT_TO_SQL_BASE_URL`, often `/v1/chat/completions`) uses an OpenAI-shaped payload but expects a **single warehouse-style analytic question** (measure, dimensions, time scope)—not conversational asks like “confirm data availability.” Challenger follow-up proposals are written and filtered (`app/services/sub_question_tts_guard.py`) so HITL only offers text-to-SQL–safe sub-questions.
+
 ## Setup
 
 From this directory:

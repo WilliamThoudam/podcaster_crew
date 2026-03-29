@@ -564,8 +564,8 @@ export function Pulsecast() {
         <div className="interrupt-modal sql-hitl-modal">
           <h3>Approve follow-up SQL</h3>
           <p>
-            The analyst suggested an extra query. Approve to run it, or decline to finish with the data
-            you already have.
+            Challenger proposed a follow-up analytic query for text-to-SQL. Approve to run it, or decline to
+            finish with the data you already have.
           </p>
           {app.sqlHitlRationale ? (
             <p className="sql-hitl-rationale" style={{ color: 'var(--text2)', fontSize: '0.9rem' }}>

@@ -684,7 +684,7 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
         if (result.kind === 'sql_approval_required') {
           const sid = stream.getSummarizingMsgId()
           const hint =
-            '_The analyst suggests an extra query._ Use the dialog to **approve** (run SQL) or **decline** (answer with current data only).'
+            '_Challenger proposed a follow-up analytic query_ (for text-to-SQL). Use the dialog to **approve** (run SQL) or **decline** (answer with current data only).'
           if (sid) {
             setQaMessages((m) =>
               m.map((msg) => (msg.id === sid ? { ...msg, text: hint } : msg)),

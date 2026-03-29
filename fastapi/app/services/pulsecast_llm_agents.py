@@ -30,6 +30,7 @@ from app.services.pulsecast_sse_emit import (
     emit_progress,
     emit_text_chunks,
 )
+from app.services.sub_question_tts_guard import is_valid_tts_sub_question
 
 PulsecastRole = Literal["HOST", "ANALYST", "MARKETING", "FINANCE", "CHALLENGER"]
 PulsecastAgentId = Literal["host", "analyst", "marketing", "finance", "challenger"]
@@ -517,6 +518,7 @@ async def _run_llm_agents_linear(
             if (
                 out.needs_more_data
                 and pq
+                and is_valid_tts_sub_question(pq)
                 and host_plan is not None
                 and analyst_plan is not None
             ):
@@ -634,6 +636,7 @@ async def _run_llm_agents_moderated_discussion(
                 if (
                     out.needs_more_data
                     and pq
+                    and is_valid_tts_sub_question(pq)
                     and host_plan is not None
                     and analyst_plan is not None
                 ):

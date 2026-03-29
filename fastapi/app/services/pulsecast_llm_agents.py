@@ -74,12 +74,48 @@ class _ModeratorOut(BaseModel):
 _JSON_BLOCK = re.compile(r"\{[\s\S]*\}", re.MULTILINE)
 
 
+def _coerce_optional_str(v: Any) -> str | None:
+    if v is None:
+        return None
+    if isinstance(v, str):
+        return v
+    if isinstance(v, (dict, list)):
+        return json.dumps(v, ensure_ascii=False)
+    return str(v)
+
+
+def _coerce_required_str(v: Any, *, field: str) -> str:
+    if isinstance(v, str):
+        return v
+    if isinstance(v, (dict, list)):
+        return json.dumps(v, ensure_ascii=False)
+    if v is None:
+        raise ValueError(f"Agent JSON field {field!r} is missing or null")
+    return str(v)
+
+
+def _normalize_agent_out_dict(obj: dict[str, Any]) -> dict[str, Any]:
+    """LLMs sometimes put structured JSON in `detail`; Pydantic expects str | null."""
+    out = dict(obj)
+    if "text" in out:
+        out["text"] = _coerce_required_str(out["text"], field="text")
+    if "phase" in out:
+        out["phase"] = _coerce_required_str(out["phase"], field="phase")
+    for key in ("detail", "proposed_sub_question", "why"):
+        if key in out:
+            out[key] = _coerce_optional_str(out[key])
+    return out
+
+
 def _parse_agent_json(raw: str) -> _AgentOut:
     s = raw.strip()
     m = _JSON_BLOCK.search(s)
     if not m:
         raise ValueError("Agent output did not contain a JSON object")
     obj = json.loads(m.group(0))
+    if not isinstance(obj, dict):
+        raise ValueError("Agent output JSON must be an object")
+    obj = _normalize_agent_out_dict(obj)
     return _AgentOut.model_validate(obj)
 
 

@@ -114,7 +114,7 @@ _SCHEMA_INTERNAL = (
     '{ "text": string, "phase": string, "detail": string|null }\n\n'
     "Rules:\n"
     "- `text`: 2–6 sentences; actionable internal notes for the Host composer.\n"
-    "- `detail`: optional nuance, caveats, or table-friendly bullets; may be null.\n"
+    "- `detail`: optional plain string only (markdown bullets ok); use null if unused — never a JSON object or array.\n"
     "- Stay within your role boundaries above.\n"
 )
 
@@ -134,6 +134,7 @@ _SCHEMA_CHALLENGER = (
     "- If true: proposed_sub_question MUST be one plain-English analytics sub-question (no SQL); why briefly "
     "explains the gap.\n"
     "- If false: proposed_sub_question and why MUST be null.\n"
+    "- `detail` must be a plain string or null, never a nested JSON object.\n"
     "- Keep text 2–6 sentences.\n"
 )
 
@@ -157,7 +158,7 @@ _HOST_COMPOSER = (
     '{ "text": string, "phase": string, "detail": string|null }\n\n'
     "Rules:\n"
     "- `phase` must be exactly: Final Answer\n"
-    "- `detail`: optional one-line subtitle or caveat; may be null.\n"
+    "- `detail`: optional one-line string or null — never a JSON object.\n"
     "- Plain language; markdown lists allowed in `text`.\n"
 )
 

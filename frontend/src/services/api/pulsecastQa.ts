@@ -124,6 +124,8 @@ export type StreamProgressEvent =
       total: number
       sub_question: string
       reason: 'duplicate_sql_detected'
+      /** Short user-facing sentence from the API */
+      message?: string
     }
   | { type: 'summarizing_started' }
   | { type: 'summarizing_chunk'; chunk: string }

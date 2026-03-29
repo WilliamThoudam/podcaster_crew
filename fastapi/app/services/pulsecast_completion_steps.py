@@ -257,6 +257,10 @@ async def run_sub_questions_slice(
                     "total": total,
                     "sub_question": sub_q,
                     "reason": "duplicate_sql_detected",
+                    "message": (
+                        f"Step {idx + 1} of {total} would repeat an earlier query; "
+                        "refining the wording."
+                    ),
                 },
             )
             if duplicate_fail_index is not None and idx == duplicate_fail_index:

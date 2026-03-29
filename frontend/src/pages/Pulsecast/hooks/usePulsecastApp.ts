@@ -333,7 +333,10 @@ function makePulsecastStreamHandlers(
     }
     if (event.type === 'sub_question_retry') {
       markThinking('ANALYST')
-      pushAnalystUpdate(`Retrying ${event.index}/${event.total}: ${event.reason}`)
+      pushAnalystUpdate(
+        event.message ??
+          `Adjusting step ${event.index} of ${event.total}.`,
+      )
     }
     if (event.type === 'summarizing_started') {
       markThinking('HOST')

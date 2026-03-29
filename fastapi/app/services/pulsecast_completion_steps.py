@@ -16,7 +16,6 @@ from app.models.schemas import (
     SubResult,
     TextToSqlResponse,
 )
-from app.prompts.text_to_sql import text_to_sql_sub_question_system_prompt
 from app.services.pulsecast_completion_types import (
     CompletionStreamComplete,
     CompletionStreamOutcome,
@@ -54,12 +53,8 @@ def extract_last_user_question(req: OpenAIChatCompletionRequest) -> str:
 
 
 def sub_question_tts_messages(*, sub_question: str) -> list[dict[str, str]]:
-    system = text_to_sql_sub_question_system_prompt()
-    user = sub_question.strip()
-    return [
-        {"role": "system", "content": system},
-        {"role": "user", "content": user},
-    ]
+    """Upstream text-to-SQL accepts user messages only (no system role)."""
+    return [{"role": "user", "content": sub_question.strip()}]
 
 
 def escape_md_cell(value: Any) -> str:

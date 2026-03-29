@@ -576,10 +576,15 @@ export function Pulsecast() {
 
       <div className={`interrupt-overlay${app.sqlHitlOpen ? ' show' : ''}`}>
         <div className="interrupt-modal sql-hitl-modal">
-          <h3>Approve follow-up SQL</h3>
+          <h3>
+            {app.sqlHitlPauseKind === 'duplicate_sub_question'
+              ? 'Approve revised sub-question'
+              : 'Approve follow-up SQL'}
+          </h3>
           <p>
-            Challenger proposed a follow-up analytic query for text-to-SQL. Approve to run it, or decline to
-            finish with the data you already have.
+            {app.sqlHitlPauseKind === 'duplicate_sub_question'
+              ? 'Text-to-SQL matched an earlier step. The analyst suggested a different sub-question. Approve to run it (you may edit), or decline to skip this step and continue the plan.'
+              : 'Challenger proposed a follow-up analytic query for text-to-SQL. Approve to run it, or decline to finish with the data you already have.'}
           </p>
           {app.sqlHitlRationale ? (
             <p className="sql-hitl-rationale" style={{ color: 'var(--text2)', fontSize: '0.9rem' }}>

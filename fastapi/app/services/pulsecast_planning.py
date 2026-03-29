@@ -10,12 +10,17 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.config import Settings
 from app.llm.chat_model import build_chat_model
-from app.models.schemas import PlanningAnalystOutput, PlanningHostOutput
+from app.models.schemas import PlanningAnalystOutput, PlanningHostOutput, SubResult
+from app.prompts.duplicate_sub_question import (
+    duplicate_sub_question_strict_suffix,
+    duplicate_sub_question_system_prompt,
+)
 from app.prompts.planning import (
     planning_analyst_system_prompt,
     planning_analyst_system_prompt_strict,
     planning_host_system_prompt,
 )
+from app.services.sub_question_tts_guard import is_valid_tts_sub_question
 
 
 class _HostOut(BaseModel):
@@ -33,6 +38,13 @@ class _AnalystOut(BaseModel):
 
     sub_questions: list[str] = Field(default_factory=list)
     rationale: str | None = None
+
+
+class _DuplicateRephraseOut(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    replacement_sub_question: str = Field(..., min_length=1)
+    rationale: str = Field(..., min_length=1)
 
 
 _SQLISH_PATTERN = re.compile(
@@ -170,4 +182,100 @@ async def run_analyst_planner(
         sub_questions = sub_questions[:6]
 
     return PlanningAnalystOutput(sub_questions=sub_questions, rationale=out.rationale)
+
+
+def _duplicate_rephrase_user_payload(
+    *,
+    question: str,
+    host: PlanningHostOutput,
+    analyst_plan: PlanningAnalystOutput,
+    sub_results: list[SubResult],
+    pending_index: int,
+    original_sub_question: str,
+    duplicate_sql: str,
+) -> str:
+    prior = [
+        {
+            "index": i + 1,
+            "sub_question": sr.sub_question,
+            "generated_sql": sr.generated_sql,
+        }
+        for i, sr in enumerate(sub_results)
+    ]
+    payload: dict[str, Any] = {
+        "user_question": question,
+        "host_planning": {
+            "primary_focus": host.primary_focus,
+            "time_window": host.time_window,
+            "region_focus": host.region_focus,
+            "metrics": host.metrics,
+            "notes": host.notes,
+        },
+        "planned_sub_questions": list(analyst_plan.sub_questions),
+        "prior_sub_question_results": prior,
+        "pending_step_index_1_based": pending_index + 1,
+        "current_sub_question": original_sub_question,
+        "duplicate_sql": duplicate_sql,
+    }
+    return json.dumps(payload, ensure_ascii=False)
+
+
+async def run_duplicate_sub_question_rephrase(
+    *,
+    settings: Settings,
+    question: str,
+    host_plan: PlanningHostOutput,
+    analyst_plan: PlanningAnalystOutput,
+    sub_results: list[SubResult],
+    pending_index: int,
+    original_sub_question: str,
+    duplicate_sql: str,
+) -> tuple[str, str]:
+    """Returns (proposed_sub_question, rationale) for HITL; TTS-valid or falls back to original."""
+    base_user = _duplicate_rephrase_user_payload(
+        question=question,
+        host=host_plan,
+        analyst_plan=analyst_plan,
+        sub_results=sub_results,
+        pending_index=pending_index,
+        original_sub_question=original_sub_question,
+        duplicate_sql=duplicate_sql,
+    )
+
+    async def _call(*, strict_extra: str) -> _DuplicateRephraseOut:
+        content = await _invoke_json_object(
+            settings=settings,
+            system_prompt=duplicate_sub_question_system_prompt(),
+            user_prompt=base_user + strict_extra,
+        )
+        data = json.loads(content)
+        return _DuplicateRephraseOut.model_validate(data)
+
+    try:
+        out = await _call(strict_extra="")
+    except Exception as first_e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Duplicate sub-question rephrase failed: {first_e}",
+        ) from first_e
+
+    prop = out.replacement_sub_question.strip()
+    rat = out.rationale.strip()
+    if is_valid_tts_sub_question(prop):
+        return prop, rat
+
+    try:
+        out2 = await _call(strict_extra=duplicate_sub_question_strict_suffix())
+        prop2 = out2.replacement_sub_question.strip()
+        rat2 = out2.rationale.strip()
+        if is_valid_tts_sub_question(prop2):
+            return prop2, rat2
+    except Exception:
+        pass
+
+    fallback_rationale = (
+        f"{rat} The suggested wording may need editing for the query engine — "
+        "please approve or edit the question below."
+    )
+    return original_sub_question.strip(), fallback_rationale
 

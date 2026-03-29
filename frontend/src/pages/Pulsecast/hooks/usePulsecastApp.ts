@@ -9,7 +9,11 @@ import {
   TOPBAR_BY_SCREEN,
   TOTAL_MS,
 } from '../constants'
-import { streamPulsecastQa, streamPulsecastResume } from '../../../services/api/pulsecastQa'
+import {
+  streamPulsecastQa,
+  streamPulsecastResume,
+  type SqlHitlPauseKind,
+} from '../../../services/api/pulsecastQa'
 import { colorToRgb, cumulativeMsBeforeSegment, fmt, segmentIndexAtElapsed } from '../utils'
 import { pathForScreen } from '../../../routes/paths'
 import type { AgentState, PodcastRole, QaMessage, Screen } from '../../../types'
@@ -169,7 +173,11 @@ function makePulsecastStreamHandlers(
     })
   }
   const onProgress = (event: StreamProgressEvent) => {
-    if (event.type === 'sql_approval_required' || event.type === 'sql_followup_declined') {
+    if (
+      event.type === 'sql_approval_required' ||
+      event.type === 'sql_followup_declined' ||
+      event.type === 'duplicate_sub_question_skipped'
+    ) {
       markThinking(null)
       return
     }
@@ -481,6 +489,7 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
   const [sqlHitlProposed, setSqlHitlProposed] = useState('')
   const [sqlHitlEdited, setSqlHitlEdited] = useState('')
   const [sqlHitlRationale, setSqlHitlRationale] = useState<string | null>(null)
+  const [sqlHitlPauseKind, setSqlHitlPauseKind] = useState<SqlHitlPauseKind>('challenger_followup')
 
   const [toast, setToast] = useState<{ message: string; visible: boolean }>({
     message: '',
@@ -689,8 +698,12 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
         setAgentStates(AGENTS.map(() => 'idle'))
         if (result.kind === 'sql_approval_required') {
           const sid = stream.getSummarizingMsgId()
+          const pk = result.pause_kind ?? 'challenger_followup'
+          setSqlHitlPauseKind(pk)
           const hint =
-            '_Challenger proposed a follow-up analytic query_ (for text-to-SQL). Use the dialog to **approve** (run SQL) or **decline** (answer with current data only).'
+            pk === 'duplicate_sub_question'
+              ? '_The same SQL was generated as for an earlier step._ The analyst suggested a revised sub-question. Use the dialog to **approve** (run SQL; you may edit the wording) or **decline** (skip this step and continue with remaining steps).'
+              : '_Challenger proposed a follow-up analytic query_ (for text-to-SQL). Use the dialog to **approve** (run SQL) or **decline** (answer with current data only).'
           if (sid) {
             setQaMessages((m) =>
               m.map((msg) => (msg.id === sid ? { ...msg, text: hint } : msg)),
@@ -716,6 +729,7 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
           setSqlHitlOpen(true)
           return
         }
+        setSqlHitlPauseKind('challenger_followup')
         if (!stream.getTypingBubbleCreated()) {
           setQaMessages((m) => [
             ...m,
@@ -789,10 +803,22 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
           },
         )
         setAgentStates(AGENTS.map(() => 'idle'))
+        if (result.kind === 'sql_approval_required') {
+          const pk = result.pause_kind ?? 'challenger_followup'
+          setSqlHitlPauseKind(pk)
+          setSqlHitlToken(result.resume_token)
+          setSqlHitlProposed(result.proposed_sub_question)
+          setSqlHitlEdited(result.proposed_sub_question)
+          setSqlHitlRationale(result.rationale)
+          setSqlHitlOpen(true)
+          return
+        }
+        const finalAnswer = result.answer
         setSqlHitlToken(null)
         setSqlHitlProposed('')
         setSqlHitlEdited('')
         setSqlHitlRationale(null)
+        setSqlHitlPauseKind('challenger_followup')
         if (!stream.getTypingBubbleCreated()) {
           setQaMessages((m) => [
             ...m,
@@ -802,7 +828,7 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
               role: 'HOST',
               emoji: QA_INSIGHT_STYLE.HOST.emoji,
               color: QA_INSIGHT_STYLE.HOST.color,
-              text: result.answer,
+              text: finalAnswer,
               createdAt: Date.now(),
             },
           ])
@@ -810,7 +836,7 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
         const synth = window.speechSynthesis
         if (synth) {
           synth.cancel()
-          const u = new SpeechSynthesisUtterance(result.answer)
+          const u = new SpeechSynthesisUtterance(finalAnswer)
           u.rate = 0.95
           synth.speak(u)
         }
@@ -945,6 +971,7 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
     sqlHitlEdited,
     setSqlHitlEdited,
     sqlHitlRationale,
+    sqlHitlPauseKind,
     submitSqlHitl,
     qaInput,
     setQaInput,

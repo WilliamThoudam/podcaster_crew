@@ -18,11 +18,17 @@ from app.models.schemas import (
     OpenAIChatCompletionChunkChoice,
     OpenAIChatCompletionDelta,
     OpenAIChatCompletionRequest,
+    OpenAIChatMessage,
     PulsecastChatResumeRequest,
     SubResult,
     TextToSqlResponse,
 )
-from app.services.pulsecast_completion_steps import sub_question_tts_messages, to_markdown_table
+from app.services.pulsecast_completion_steps import (
+    phase_agents_finalize,
+    run_sub_questions_slice,
+    sub_question_tts_messages,
+    to_markdown_table,
+)
 from app.services.pulsecast_completion_types import (
     CompletionStreamComplete,
     CompletionStreamOutcome,
@@ -30,7 +36,12 @@ from app.services.pulsecast_completion_types import (
     ProgressCallback,
 )
 from app.services.pulsecast_llm_agents import run_llm_agents_host_only
-from app.services.pulsecast_resume_store import PulsecastPausedSnapshot
+from app.services.pulsecast_resume_store import (
+    DuplicateSubQuestionPausedSnapshot,
+    PulsecastPausedSnapshot,
+    PulsecastPausedSnapshotUnion,
+)
+from app.services.sub_question_tts_guard import is_valid_tts_sub_question
 from app.services.pulsecast_sse_emit import (
     STREAM_CHUNK_SIZE,
     STREAM_DELAY_S,
@@ -45,6 +56,8 @@ __all__ = [
     "CompletionStreamOutcome",
     "CompletionStreamPaused",
     "build_completion_payload",
+    "build_resume_dispatcher",
+    "build_resume_duplicate_sub_question_payload",
     "build_resume_payload",
     "stream_completion_sse",
     "stream_resume_sse",
@@ -223,56 +236,28 @@ async def build_resume_payload(
             "sub_question": sub_q,
         },
     )
-    duplicate_sql = any(sr.generated_sql == sql for sr in sub_results)
-    if duplicate_sql:
-        await emit_progress(
-            on_progress,
-            {
-                "type": "sub_question_retry",
-                "index": idx + 1,
-                "total": total,
-                "sub_question": sub_q,
-                "reason": "duplicate_sql_detected",
-            },
-        )
-        try:
-            retry_tts = await generate_sql(
-                settings=settings,
-                question=sub_q,
-                messages=sub_question_tts_messages(sub_question=sub_q, retry_for_duplicate=True),
-                user_id=user_id,
-                user_db_id=user_db_id,
-                db_type=db_type,
-                schema_name=schema_name,
-                session_id=snapshot.openai_user,
-                model=model,
-                max_nodes=max_nodes,
-                is_retry=True,
-                trace_context={
-                    "sub_question_index": idx + 1,
-                    "sub_question_total": total,
-                    "sub_question_text": sub_q,
-                    "planner_mode": "hitl_followup",
-                    "retry_reason": "duplicate_sql",
-                },
-            )
-            if not retry_tts.error:
-                retry_sql = validate_and_normalize_sql((retry_tts.generated_sql or "").strip())
-                if retry_sql and not any(sr.generated_sql == retry_sql for sr in sub_results):
-                    sql = retry_sql
-        except httpx.HTTPError:
-            pass
+    prior_same_sql = next((sr for sr in sub_results if sr.generated_sql == sql), None)
 
-    try:
-        await emit_progress(
-            on_progress,
-            {
-                "type": "execute_started",
-                "index": idx + 1,
-                "total": total,
-                "sub_question": sub_q,
-            },
-        )
+    await emit_progress(
+        on_progress,
+        {
+            "type": "execute_started",
+            "index": idx + 1,
+            "total": total,
+            "sub_question": sub_q,
+        },
+    )
+    await emit_text_chunks(
+        on_progress=on_progress,
+        base_event={
+            "index": idx + 1,
+            "total": total,
+            "sub_question": sub_q,
+        },
+        text=f"Executing {idx + 1}/{total}: {sub_q}",
+        event_type="execute_label_chunk",
+    )
+    if prior_same_sql is not None:
         await emit_text_chunks(
             on_progress=on_progress,
             base_event={
@@ -280,9 +265,11 @@ async def build_resume_payload(
                 "total": total,
                 "sub_question": sub_q,
             },
-            text=f"Executing {idx + 1}/{total}: {sub_q}",
-            event_type="execute_label_chunk",
+            text="Reusing result from an earlier sub-question (identical SQL).",
+            event_type="execute_generating_chunk",
         )
+        exe = prior_same_sql.execute
+    else:
         await emit_text_chunks(
             on_progress=on_progress,
             base_event={
@@ -293,18 +280,19 @@ async def build_resume_payload(
             text="Executing…",
             event_type="execute_generating_chunk",
         )
-        exe = await execute_sql_client(
-            settings=settings,
-            sql=sql,
-            user_id=user_id,
-            user_db_id=user_db_id,
-            db_type=db_type,
-        )
-    except httpx.HTTPError as e:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Execute SQL service error for follow-up SQL: {e}",
-        ) from e
+        try:
+            exe = await execute_sql_client(
+                settings=settings,
+                sql=sql,
+                user_id=user_id,
+                user_db_id=user_db_id,
+                db_type=db_type,
+            )
+        except httpx.HTTPError as e:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Execute SQL service error for follow-up SQL: {e}",
+            ) from e
 
     if not exe.success:
         raise HTTPException(
@@ -380,11 +368,127 @@ async def build_resume_payload(
     return CompletionStreamComplete(content=agents_done.answer)
 
 
+def _openai_request_for_duplicate_snapshot(snap: DuplicateSubQuestionPausedSnapshot) -> OpenAIChatCompletionRequest:
+    return OpenAIChatCompletionRequest(
+        model="pulsecast-qa",
+        stream=True,
+        messages=[OpenAIChatMessage(role="user", content=snap.question)],
+        user=snap.openai_user,
+    )
+
+
+async def build_resume_duplicate_sub_question_payload(
+    *,
+    settings: Settings,
+    snapshot: DuplicateSubQuestionPausedSnapshot,
+    approved: bool,
+    edited_question: str | None,
+    on_progress: ProgressCallback | None = None,
+) -> CompletionStreamOutcome:
+    """Resume after duplicate-SQL HITL: finish sub-questions, then agent panel."""
+    openai_req = _openai_request_for_duplicate_snapshot(snapshot)
+
+    if not approved:
+        await emit_progress(on_progress, {"type": "duplicate_sub_question_skipped"})
+        sub_out = await run_sub_questions_slice(
+            settings=settings,
+            req=openai_req,
+            question=snapshot.question,
+            host_plan=snapshot.host_plan,
+            analyst_plan=snapshot.analyst_plan,
+            on_progress=on_progress,
+            start_index=snapshot.pending_index + 1,
+            sub_results=list(snapshot.sub_results),
+            primary_sql=snapshot.primary_sql,
+            primary_exe=snapshot.primary_exe,
+            first_sub_question_override=None,
+            duplicate_fail_index=None,
+        )
+        if isinstance(sub_out, CompletionStreamPaused):
+            return sub_out
+        sub_results, primary_sql, primary_exe = sub_out
+        return await phase_agents_finalize(
+            settings=settings,
+            req=openai_req,
+            question=snapshot.question,
+            host_plan=snapshot.host_plan,
+            analyst_plan=snapshot.analyst_plan,
+            primary_sql=primary_sql,
+            primary_exe=primary_exe,
+            sub_results=sub_results,
+            on_progress=on_progress,
+        )
+
+    sub_q = (edited_question or "").strip() or snapshot.proposed_sub_question
+    if not is_valid_tts_sub_question(sub_q):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "invalid_sub_question_for_text_to_sql": True,
+                "sub_question": sub_q,
+                "message": "Question must be a single declarative analytics ask; edit and try again.",
+            },
+        )
+
+    sub_out = await run_sub_questions_slice(
+        settings=settings,
+        req=openai_req,
+        question=snapshot.question,
+        host_plan=snapshot.host_plan,
+        analyst_plan=snapshot.analyst_plan,
+        on_progress=on_progress,
+        start_index=snapshot.pending_index,
+        sub_results=list(snapshot.sub_results),
+        primary_sql=snapshot.primary_sql,
+        primary_exe=snapshot.primary_exe,
+        first_sub_question_override=sub_q,
+        duplicate_fail_index=snapshot.pending_index,
+    )
+    if isinstance(sub_out, CompletionStreamPaused):
+        return sub_out
+    sub_results, primary_sql, primary_exe = sub_out
+    return await phase_agents_finalize(
+        settings=settings,
+        req=openai_req,
+        question=snapshot.question,
+        host_plan=snapshot.host_plan,
+        analyst_plan=snapshot.analyst_plan,
+        primary_sql=primary_sql,
+        primary_exe=primary_exe,
+        sub_results=sub_results,
+        on_progress=on_progress,
+    )
+
+
+async def build_resume_dispatcher(
+    *,
+    settings: Settings,
+    snapshot: PulsecastPausedSnapshotUnion,
+    req: PulsecastChatResumeRequest,
+    on_progress: ProgressCallback | None = None,
+) -> CompletionStreamOutcome:
+    if isinstance(snapshot, DuplicateSubQuestionPausedSnapshot):
+        return await build_resume_duplicate_sub_question_payload(
+            settings=settings,
+            snapshot=snapshot,
+            approved=req.approved,
+            edited_question=req.edited_question,
+            on_progress=on_progress,
+        )
+    return await build_resume_payload(
+        settings=settings,
+        snapshot=snapshot,
+        approved=req.approved,
+        edited_question=req.edited_question,
+        on_progress=on_progress,
+    )
+
+
 async def stream_resume_sse(
     *,
     settings: Settings,
     req: PulsecastChatResumeRequest,
-    snapshot: PulsecastPausedSnapshot,
+    snapshot: PulsecastPausedSnapshotUnion,
 ) -> AsyncIterator[str]:
     completion_id = f"chatcmpl_{uuid.uuid4().hex}"
     progress_q: asyncio.Queue[str] = asyncio.Queue()
@@ -395,11 +499,10 @@ async def stream_resume_sse(
         await progress_q.put(marker)
 
     task = asyncio.create_task(
-        build_resume_payload(
+        build_resume_dispatcher(
             settings=settings,
             snapshot=snapshot,
-            approved=req.approved,
-            edited_question=req.edited_question,
+            req=req,
             on_progress=on_progress,
         )
     )
@@ -423,6 +526,14 @@ async def stream_resume_sse(
             raise
         error_text = f"Failed to generate response: {e}"
         yield f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), content=error_text)}\n\n"
+        yield f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), finish_reason='stop')}\n\n"
+        yield "data: [DONE]\n\n"
+        return
+
+    if isinstance(outcome, CompletionStreamPaused):
+        if not started:
+            started = True
+            yield f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), role='assistant')}\n\n"
         yield f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), finish_reason='stop')}\n\n"
         yield "data: [DONE]\n\n"
         return

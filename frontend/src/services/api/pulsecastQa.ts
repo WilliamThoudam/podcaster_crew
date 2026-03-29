@@ -80,6 +80,8 @@ type StreamCallbacks = {
   onProgress?: (event: StreamProgressEvent) => void
 }
 
+export type SqlHitlPauseKind = 'challenger_followup' | 'duplicate_sub_question'
+
 export type StreamQaOutcome =
   | { kind: 'complete'; answer: string }
   | {
@@ -87,6 +89,7 @@ export type StreamQaOutcome =
       resume_token: string
       proposed_sub_question: string
       rationale: string | null
+      pause_kind?: SqlHitlPauseKind
     }
 
 export type PulsecastResumeRequestBody = {
@@ -151,8 +154,10 @@ export type StreamProgressEvent =
       resume_token: string
       proposed_sub_question: string
       rationale?: string | null
+      pause_kind?: SqlHitlPauseKind
     }
   | { type: 'sql_followup_declined' }
+  | { type: 'duplicate_sub_question_skipped' }
 
 function apiBase(): string {
   const b = import.meta.env.VITE_PULSECAST_API_URL
@@ -224,6 +229,7 @@ type ConsumeSseResult =
       resume_token: string
       proposed_sub_question: string
       rationale: string | null
+      pause_kind: SqlHitlPauseKind
     }
 
 async function consumeSseChatStream(
@@ -237,7 +243,12 @@ async function consumeSseChatStream(
   let rawBuffer = ''
   let assembled = ''
   let sqlApproval:
-    | { resume_token: string; proposed_sub_question: string; rationale: string | null }
+    | {
+        resume_token: string
+        proposed_sub_question: string
+        rationale: string | null
+        pause_kind: SqlHitlPauseKind
+      }
     | undefined
 
   while (true) {
@@ -265,6 +276,7 @@ async function consumeSseChatStream(
                 resume_token: event.resume_token,
                 proposed_sub_question: event.proposed_sub_question,
                 rationale: event.rationale ?? null,
+                pause_kind: event.pause_kind ?? 'challenger_followup',
               }
             }
             callbacks?.onProgress?.(event)
@@ -281,7 +293,13 @@ async function consumeSseChatStream(
 
   if (!assembled.trim()) {
     if (sqlApproval) {
-      return { outcome: 'sql_approval_required', ...sqlApproval }
+      return {
+        outcome: 'sql_approval_required',
+        resume_token: sqlApproval.resume_token,
+        proposed_sub_question: sqlApproval.proposed_sub_question,
+        rationale: sqlApproval.rationale,
+        pause_kind: sqlApproval.pause_kind,
+      }
     }
     throw new Error('No assistant content received from stream')
   }
@@ -326,6 +344,7 @@ export async function streamPulsecastQa(
       resume_token: raw.resume_token,
       proposed_sub_question: raw.proposed_sub_question,
       rationale: raw.rationale,
+      pause_kind: raw.pause_kind,
     }
   }
   return { kind: 'complete', answer: raw.assembled }
@@ -334,7 +353,7 @@ export async function streamPulsecastQa(
 export async function streamPulsecastResume(
   body: PulsecastResumeRequestBody,
   callbacks?: StreamCallbacks,
-): Promise<QAResponse> {
+): Promise<StreamQaOutcome> {
   const req = {
     model: 'pulsecast-qa',
     stream: true,
@@ -361,7 +380,13 @@ export async function streamPulsecastResume(
   }
   const raw = await consumeSseChatStream(res, callbacks)
   if (raw.outcome === 'sql_approval_required') {
-    throw new Error('Unexpected sql_approval_required on resume stream')
+    return {
+      kind: 'sql_approval_required',
+      resume_token: raw.resume_token,
+      proposed_sub_question: raw.proposed_sub_question,
+      rationale: raw.rationale,
+      pause_kind: raw.pause_kind,
+    }
   }
-  return { answer: raw.assembled }
+  return { kind: 'complete', answer: raw.assembled }
 }

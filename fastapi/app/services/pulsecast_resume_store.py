@@ -3,7 +3,7 @@ from __future__ import annotations
 import secrets
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal, Union
 
 from app.models.schemas import (
     AgentPipelineStep,
@@ -17,6 +17,67 @@ from app.services.pulsecast_llm_agents import (
     DiscussionTurn,
     _AgentOut,
 )
+
+PauseKindChallenger = Literal["challenger_followup"]
+PauseKindDuplicate = Literal["duplicate_sub_question"]
+
+# Union of snapshots stored under a resume_token (Challenger HITL vs duplicate-SQL rephrase HITL).
+PulsecastPausedSnapshotUnion = Union["PulsecastPausedSnapshot", "DuplicateSubQuestionPausedSnapshot"]
+
+
+@dataclass
+class DuplicateSubQuestionPausedSnapshot:
+    """Resume after duplicate SQL: user approves/edits analyst-proposed replacement sub-question."""
+
+    question: str
+    host_plan: PlanningHostOutput
+    analyst_plan: PlanningAnalystOutput
+    sub_results: list[SubResult]
+    pending_index: int
+    original_sub_question: str
+    duplicate_sql: str
+    proposed_sub_question: str
+    rationale: str | None
+    primary_sql: str
+    primary_exe: ExecuteSqlResponse
+    openai_user: str | None
+
+    pause_kind: PauseKindDuplicate = "duplicate_sub_question"
+
+    def to_json_dict(self) -> dict[str, Any]:
+        return {
+            "pause_kind": "duplicate_sub_question",
+            "question": self.question,
+            "host_plan": self.host_plan.model_dump(mode="json"),
+            "analyst_plan": self.analyst_plan.model_dump(mode="json"),
+            "sub_results": [sr.model_dump(mode="json") for sr in self.sub_results],
+            "pending_index": self.pending_index,
+            "original_sub_question": self.original_sub_question,
+            "duplicate_sql": self.duplicate_sql,
+            "proposed_sub_question": self.proposed_sub_question,
+            "rationale": self.rationale,
+            "primary_sql": self.primary_sql,
+            "primary_exe": self.primary_exe.model_dump(mode="json"),
+            "openai_user": self.openai_user,
+        }
+
+    @staticmethod
+    def from_json_dict(d: dict[str, Any]) -> DuplicateSubQuestionPausedSnapshot:
+        sub_results = [SubResult.model_validate(x) for x in d["sub_results"]]
+        return DuplicateSubQuestionPausedSnapshot(
+            question=d["question"],
+            host_plan=PlanningHostOutput.model_validate(d["host_plan"]),
+            analyst_plan=PlanningAnalystOutput.model_validate(d["analyst_plan"]),
+            sub_results=sub_results,
+            pending_index=int(d["pending_index"]),
+            original_sub_question=d["original_sub_question"],
+            duplicate_sql=d["duplicate_sql"],
+            proposed_sub_question=d["proposed_sub_question"],
+            rationale=d.get("rationale"),
+            primary_sql=d["primary_sql"],
+            primary_exe=ExecuteSqlResponse.model_validate(d["primary_exe"]),
+            openai_user=d.get("openai_user"),
+        )
 
 
 @dataclass
@@ -36,8 +97,11 @@ class PulsecastPausedSnapshot:
     rationale: str | None
     openai_user: str | None
 
+    pause_kind: PauseKindChallenger = "challenger_followup"
+
     def to_json_dict(self) -> dict[str, Any]:
         return {
+            "pause_kind": "challenger_followup",
             "pipeline": [p.model_dump(mode="json") for p in self.pipeline],
             "analyst": self.discussion.analyst.model_dump(mode="json"),
             "discussion_turns": [t.model_dump(mode="json") for t in self.discussion.turns],
@@ -82,6 +146,13 @@ class PulsecastPausedSnapshot:
         )
 
 
+def deserialize_paused_snapshot(d: dict[str, Any]) -> PulsecastPausedSnapshotUnion:
+    kind = d.get("pause_kind")
+    if kind == "duplicate_sub_question":
+        return DuplicateSubQuestionPausedSnapshot.from_json_dict(d)
+    return PulsecastPausedSnapshot.from_json_dict(d)
+
+
 class PulsecastResumeStore:
     """In-memory TTL map: resume_token -> serialized paused snapshot."""
 
@@ -95,13 +166,13 @@ class PulsecastResumeStore:
         for k in dead:
             del self._entries[k]
 
-    def issue_token(self, snapshot: PulsecastPausedSnapshot) -> str:
+    def issue_token(self, snapshot: PulsecastPausedSnapshotUnion) -> str:
         self._purge_expired()
         token = secrets.token_urlsafe(32)
         self._entries[token] = (time.monotonic() + self._ttl, snapshot.to_json_dict())
         return token
 
-    def pop(self, token: str) -> PulsecastPausedSnapshot | None:
+    def pop(self, token: str) -> PulsecastPausedSnapshotUnion | None:
         self._purge_expired()
         item = self._entries.pop(token, None)
         if item is None:
@@ -110,7 +181,7 @@ class PulsecastResumeStore:
         if time.monotonic() > exp:
             return None
         try:
-            return PulsecastPausedSnapshot.from_json_dict(payload)
+            return deserialize_paused_snapshot(payload)
         except (KeyError, ValueError, TypeError):
             return None
 

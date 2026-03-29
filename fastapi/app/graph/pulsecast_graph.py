@@ -19,7 +19,7 @@ from app.services.pulsecast_completion_steps import (
     phase_planning,
     phase_sub_questions,
 )
-from app.services.pulsecast_completion_types import CompletionStreamOutcome
+from app.services.pulsecast_completion_types import CompletionStreamOutcome, CompletionStreamPaused
 
 
 class PulsecastState(TypedDict, total=False):
@@ -44,13 +44,25 @@ async def _node_planning(state: PulsecastState, config: RunnableConfig) -> dict[
 
 async def _node_sub_questions(state: PulsecastState, config: RunnableConfig) -> dict[str, Any]:
     c = config["configurable"]
-    sr, psql, pexe = await phase_sub_questions(
+    result = await phase_sub_questions(
         settings=c["settings"],
         req=c["req"],
+        question=state["question"],
+        host_plan=state["host_plan"],
         analyst_plan=state["analyst_plan"],
         on_progress=c.get("on_progress"),
     )
+    if isinstance(result, CompletionStreamPaused):
+        return {"outcome": result}
+    sr, psql, pexe = result
     return {"sub_results": sr, "primary_sql": psql, "primary_exe": pexe}
+
+
+def _route_after_sub_questions(state: PulsecastState) -> str:
+    out = state.get("outcome")
+    if isinstance(out, CompletionStreamPaused):
+        return "end"
+    return "agents"
 
 
 async def _node_agents(state: PulsecastState, config: RunnableConfig) -> dict[str, Any]:
@@ -81,7 +93,11 @@ def _get_compiled_graph() -> Any:
         workflow.add_node("agents", _node_agents)
         workflow.set_entry_point("planning")
         workflow.add_edge("planning", "sub_questions")
-        workflow.add_edge("sub_questions", "agents")
+        workflow.add_conditional_edges(
+            "sub_questions",
+            _route_after_sub_questions,
+            {"end": END, "agents": "agents"},
+        )
         workflow.add_edge("agents", END)
         _compiled_graph = workflow.compile()
     return _compiled_graph
@@ -104,4 +120,7 @@ async def run_pulsecast_completion_graph(
             },
         },
     )
-    return final["outcome"]
+    out = final.get("outcome")
+    if out is None:
+        raise RuntimeError("Pulsecast graph finished without an outcome")
+    return out

@@ -16,6 +16,7 @@ from app.models.schemas import (
     SubResult,
     TextToSqlResponse,
 )
+from app.prompts.text_to_sql import text_to_sql_sub_question_system_prompt
 from app.services.pulsecast_completion_types import (
     CompletionStreamComplete,
     CompletionStreamOutcome,
@@ -23,17 +24,21 @@ from app.services.pulsecast_completion_types import (
     ProgressCallback,
 )
 from app.services.pulsecast_llm_agents import LlmAgentsPaused, run_llm_agents
-from app.services.pulsecast_planning import run_analyst_planner, run_host_planner
-from app.services.pulsecast_resume_store import PulsecastPausedSnapshot, resume_store
+from app.services.pulsecast_planning import (
+    run_analyst_planner,
+    run_duplicate_sub_question_rephrase,
+    run_host_planner,
+)
+from app.services.pulsecast_resume_store import (
+    DuplicateSubQuestionPausedSnapshot,
+    PulsecastPausedSnapshot,
+    resume_store,
+)
 from app.services.pulsecast_sse_emit import (
     STREAM_CHUNK_SIZE,
     STREAM_DELAY_S,
     emit_progress,
     emit_text_chunks,
-)
-from app.prompts.text_to_sql import (
-    TEXT_TO_SQL_SUB_QUESTION_RETRY_SUFFIX,
-    text_to_sql_sub_question_system_prompt,
 )
 from app.services.qa_pipeline import build_answer_summary, validate_and_normalize_sql
 
@@ -48,15 +53,9 @@ def extract_last_user_question(req: OpenAIChatCompletionRequest) -> str:
     )
 
 
-def sub_question_tts_messages(
-    *,
-    sub_question: str,
-    retry_for_duplicate: bool = False,
-) -> list[dict[str, str]]:
+def sub_question_tts_messages(*, sub_question: str) -> list[dict[str, str]]:
     system = text_to_sql_sub_question_system_prompt()
     user = sub_question.strip()
-    if retry_for_duplicate:
-        user = f"{user}\n\n{TEXT_TO_SQL_SUB_QUESTION_RETRY_SUFFIX}"
     return [
         {"role": "system", "content": system},
         {"role": "user", "content": user},
@@ -123,31 +122,42 @@ async def phase_planning(
     return question, host_plan, analyst_plan
 
 
-async def phase_sub_questions(
+async def run_sub_questions_slice(
     *,
     settings: Settings,
     req: OpenAIChatCompletionRequest,
+    question: str,
+    host_plan: PlanningHostOutput,
     analyst_plan: PlanningAnalystOutput,
     on_progress: ProgressCallback | None,
-) -> tuple[list[SubResult], str, ExecuteSqlResponse]:
+    start_index: int,
+    sub_results: list[SubResult],
+    primary_sql: str | None,
+    primary_exe: ExecuteSqlResponse | None,
+    first_sub_question_override: str | None,
+    duplicate_fail_index: int | None,
+) -> tuple[list[SubResult], str, ExecuteSqlResponse] | CompletionStreamPaused:
+    """Run sub-questions from start_index. On duplicate SQL: HITL pause or 422 if idx == duplicate_fail_index."""
     user_id = settings.default_user_id
     user_db_id = settings.default_user_db_id
     db_type = settings.default_db_type
     schema_name = settings.default_schema_name
     model = settings.default_model
     max_nodes = settings.default_max_nodes
+    total = len(analyst_plan.sub_questions)
+    pending_override = first_sub_question_override
 
-    sub_results: list[SubResult] = []
-    primary_sql: str | None = None
-    primary_exe = None
+    for idx in range(start_index, total):
+        sub_q = pending_override if pending_override is not None else analyst_plan.sub_questions[idx]
+        if pending_override is not None:
+            pending_override = None
 
-    for idx, sub_q in enumerate(analyst_plan.sub_questions):
         await emit_progress(
             on_progress,
             {
                 "type": "sub_question_start",
                 "index": idx + 1,
-                "total": len(analyst_plan.sub_questions),
+                "total": total,
                 "sub_question": sub_q,
             },
         )
@@ -158,7 +168,7 @@ async def phase_sub_questions(
                 {
                     "type": "tts_started",
                     "index": idx + 1,
-                    "total": len(analyst_plan.sub_questions),
+                    "total": total,
                     "sub_question": sub_q,
                 },
             )
@@ -166,17 +176,17 @@ async def phase_sub_questions(
                 on_progress=on_progress,
                 base_event={
                     "index": idx + 1,
-                    "total": len(analyst_plan.sub_questions),
+                    "total": total,
                     "sub_question": sub_q,
                 },
-                text=f"Text-to-SQL {idx + 1}/{len(analyst_plan.sub_questions)}: {sub_q}",
+                text=f"Text-to-SQL {idx + 1}/{total}: {sub_q}",
                 event_type="tts_label_chunk",
             )
             await emit_text_chunks(
                 on_progress=on_progress,
                 base_event={
                     "index": idx + 1,
-                    "total": len(analyst_plan.sub_questions),
+                    "total": total,
                     "sub_question": sub_q,
                 },
                 text="Generating…",
@@ -196,7 +206,7 @@ async def phase_sub_questions(
                 is_retry=False,
                 trace_context={
                     "sub_question_index": idx + 1,
-                    "sub_question_total": len(analyst_plan.sub_questions),
+                    "sub_question_total": total,
                     "sub_question_text": sub_q,
                     "planner_mode": "analyst_decomposition",
                 },
@@ -222,7 +232,7 @@ async def phase_sub_questions(
             on_progress=on_progress,
             base_event={
                 "index": idx + 1,
-                "total": len(analyst_plan.sub_questions),
+                "total": total,
                 "sub_question": sub_q,
             },
             text=sql,
@@ -233,7 +243,7 @@ async def phase_sub_questions(
             {
                 "type": "tts_done",
                 "index": idx + 1,
-                "total": len(analyst_plan.sub_questions),
+                "total": total,
                 "sub_question": sub_q,
             },
         )
@@ -244,48 +254,75 @@ async def phase_sub_questions(
                 {
                     "type": "sub_question_retry",
                     "index": idx + 1,
-                    "total": len(analyst_plan.sub_questions),
+                    "total": total,
                     "sub_question": sub_q,
                     "reason": "duplicate_sql_detected",
                 },
             )
-            try:
-                retry_tts = await generate_sql(
-                    settings=settings,
-                    question=sub_q,
-                    messages=sub_question_tts_messages(
-                        sub_question=sub_q,
-                        retry_for_duplicate=True,
-                    ),
-                    user_id=user_id,
-                    user_db_id=user_db_id,
-                    db_type=db_type,
-                    schema_name=schema_name,
-                    session_id=req.user,
-                    model=model,
-                    max_nodes=max_nodes,
-                    is_retry=True,
-                    trace_context={
-                        "sub_question_index": idx + 1,
-                        "sub_question_total": len(analyst_plan.sub_questions),
-                        "sub_question_text": sub_q,
-                        "planner_mode": "analyst_decomposition",
-                        "retry_reason": "duplicate_sql",
+            if duplicate_fail_index is not None and idx == duplicate_fail_index:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail={
+                        "duplicate_sql_after_hitl": True,
+                        "sub_question": sub_q,
+                        "generated_sql": sql,
+                        "message": "Text-to-SQL still produced SQL identical to a prior sub-question; edit the question and try again.",
                     },
                 )
-                if not retry_tts.error:
-                    retry_sql = validate_and_normalize_sql((retry_tts.generated_sql or "").strip())
-                    if retry_sql and not any(sr.generated_sql == retry_sql for sr in sub_results):
-                        sql = retry_sql
-            except httpx.HTTPError:
-                pass
+            orig = analyst_plan.sub_questions[idx]
+            proposed, rationale = await run_duplicate_sub_question_rephrase(
+                settings=settings,
+                question=question,
+                host_plan=host_plan,
+                analyst_plan=analyst_plan,
+                sub_results=sub_results,
+                pending_index=idx,
+                original_sub_question=orig,
+                duplicate_sql=sql,
+            )
+            if primary_sql is None or primary_exe is None:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="duplicate_sql_detected but no primary_sql (unexpected)",
+                )
+            snap = DuplicateSubQuestionPausedSnapshot(
+                question=question,
+                host_plan=host_plan,
+                analyst_plan=analyst_plan,
+                sub_results=list(sub_results),
+                pending_index=idx,
+                original_sub_question=orig,
+                duplicate_sql=sql,
+                proposed_sub_question=proposed,
+                rationale=rationale,
+                primary_sql=primary_sql,
+                primary_exe=primary_exe,
+                openai_user=req.user,
+            )
+            token = resume_store.issue_token(snap)
+            await emit_progress(
+                on_progress,
+                {
+                    "type": "sql_approval_required",
+                    "resume_token": token,
+                    "proposed_sub_question": proposed,
+                    "rationale": rationale,
+                    "pause_kind": "duplicate_sub_question",
+                },
+            )
+            return CompletionStreamPaused(
+                resume_token=token,
+                proposed_sub_question=proposed,
+                rationale=rationale,
+            )
+
         try:
             await emit_progress(
                 on_progress,
                 {
                     "type": "execute_started",
                     "index": idx + 1,
-                    "total": len(analyst_plan.sub_questions),
+                    "total": total,
                     "sub_question": sub_q,
                 },
             )
@@ -293,17 +330,17 @@ async def phase_sub_questions(
                 on_progress=on_progress,
                 base_event={
                     "index": idx + 1,
-                    "total": len(analyst_plan.sub_questions),
+                    "total": total,
                     "sub_question": sub_q,
                 },
-                text=f"Executing {idx + 1}/{len(analyst_plan.sub_questions)}: {sub_q}",
+                text=f"Executing {idx + 1}/{total}: {sub_q}",
                 event_type="execute_label_chunk",
             )
             await emit_text_chunks(
                 on_progress=on_progress,
                 base_event={
                     "index": idx + 1,
-                    "total": len(analyst_plan.sub_questions),
+                    "total": total,
                     "sub_question": sub_q,
                 },
                 text="Executing…",
@@ -348,7 +385,7 @@ async def phase_sub_questions(
             on_progress=on_progress,
             base_event={
                 "index": idx + 1,
-                "total": len(analyst_plan.sub_questions),
+                "total": total,
                 "sub_question": sub_q,
             },
             text=table_md,
@@ -359,7 +396,7 @@ async def phase_sub_questions(
             {
                 "type": "execute_done",
                 "index": idx + 1,
-                "total": len(analyst_plan.sub_questions),
+                "total": total,
                 "sub_question": sub_q,
             },
         )
@@ -368,7 +405,7 @@ async def phase_sub_questions(
             {
                 "type": "sub_question_done",
                 "index": idx + 1,
-                "total": len(analyst_plan.sub_questions),
+                "total": total,
                 "sub_question": sub_q,
             },
         )
@@ -379,6 +416,31 @@ async def phase_sub_questions(
             detail="No successful sub-question results were produced",
         )
     return sub_results, primary_sql, primary_exe
+
+
+async def phase_sub_questions(
+    *,
+    settings: Settings,
+    req: OpenAIChatCompletionRequest,
+    question: str,
+    host_plan: PlanningHostOutput,
+    analyst_plan: PlanningAnalystOutput,
+    on_progress: ProgressCallback | None,
+) -> tuple[list[SubResult], str, ExecuteSqlResponse] | CompletionStreamPaused:
+    return await run_sub_questions_slice(
+        settings=settings,
+        req=req,
+        question=question,
+        host_plan=host_plan,
+        analyst_plan=analyst_plan,
+        on_progress=on_progress,
+        start_index=0,
+        sub_results=[],
+        primary_sql=None,
+        primary_exe=None,
+        first_sub_question_override=None,
+        duplicate_fail_index=None,
+    )
 
 
 async def phase_agents_finalize(
@@ -428,6 +490,7 @@ async def phase_agents_finalize(
                 "resume_token": token,
                 "proposed_sub_question": agents_out.proposed_sub_question,
                 "rationale": agents_out.rationale,
+                "pause_kind": "challenger_followup",
             },
         )
         return CompletionStreamPaused(

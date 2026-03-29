@@ -11,6 +11,11 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.config import Settings
 from app.llm.chat_model import build_chat_model
+from app.prompts.llm_agents import (
+    system_prompt_host_composer,
+    system_prompt_internal,
+    system_prompt_moderator,
+)
 from app.models.schemas import (
     AgentInsight,
     AgentPipelineStep,
@@ -218,102 +223,6 @@ def _context_blob_compact(
     return base
 
 
-def _system_prompt_internal(role: PulsecastRole, *, discussion_aware: bool = False) -> str:
-    base = (
-        "You are a Pulsecast internal enrichment agent.\n"
-        f"Your role is: {role}\n\n"
-        "Database execution context includes ONLY the `data_sample` row objects (and per sub_question "
-        "`data_sample` entries under sub_results), plus `rows_returned` and `columns_in_data` derived "
-        "from that same data array. There is no separate metadata from the execute tool (no server "
-        "rowCount beyond len(data), no limit flags, no column typing from the tool).\n"
-        "Treat quantitative claims as supported only by values visible in those samples; SQL states intent.\n\n"
-    )
-    disc = ""
-    if discussion_aware and role in ("MARKETING", "FINANCE", "CHALLENGER"):
-        disc = (
-            "You are in a moderated multi-turn discussion with other internal agents.\n"
-            "Read the chronological transcript in the user message; respond to the latest substantive "
-            "points others raised while staying grounded in the context JSON samples.\n\n"
-        )
-    if role == "CHALLENGER":
-        return (
-            base
-            + disc
-            + "You MUST return ONLY valid JSON (no markdown, no backticks, no extra text).\n"
-            "Schema:\n"
-            '{\n'
-            '  "text": string,\n'
-            '  "phase": string,\n'
-            '  "detail": string|null,\n'
-            '  "needs_more_data": boolean,\n'
-            '  "proposed_sub_question": string|null,\n'
-            '  "why": string|null\n'
-            "}\n\n"
-            "Rules:\n"
-            "- Set needs_more_data true ONLY if the current samples are clearly insufficient to answer "
-            "the user question with confidence (e.g. empty, wrong grain, missing dimension).\n"
-            "- If true, proposed_sub_question MUST be one plain-English analytics sub-question (no SQL).\n"
-            "- If false, set proposed_sub_question and why to null.\n"
-            "- Base your response on the context JSON; keep text short (2-5 sentences).\n"
-        )
-    return (
-        base
-        + disc
-        + "You MUST return ONLY valid JSON (no markdown, no backticks, no extra text).\n"
-        "Schema:\n"
-        '{ "text": string, "phase": string, "detail": string|null }\n\n'
-        "Rules:\n"
-        "- Base your response strictly on the context JSON: question, generated_sql, data samples, planning.\n"
-        "- Your output is internal notes for the Host composer, not a user-facing response.\n"
-        "- If samples are empty or too thin, say so and suggest the smallest next query refinement.\n"
-        "- Keep it short and actionable (2-5 sentences).\n"
-    )
-
-
-def _system_prompt_host_composer() -> str:
-    return (
-        "You are the HOST composer in Pulsecast.\n"
-        "You produce the single final answer shown to the user. The user message includes Context JSON "
-        "(with `data_sample` and sub_results samples from execute_sql) plus an ANALYST opening and a "
-        "chronological internal discussion transcript (Marketing, Finance, Challenger rounds).\n"
-        "Synthesize their internal JSON notes with that evidence; do not invent totals, limits, or cell "
-        "values not present in the samples.\n"
-        "If context contains user_declined_extra_sql true, the user chose not to run a follow-up query—"
-        "answer only from existing samples; do not imply new data was loaded.\n\n"
-        "You MUST return ONLY valid JSON (no markdown, no backticks, no extra text).\n"
-        "Schema:\n"
-        '{ "text": string, "phase": string, "detail": string|null }\n\n'
-        "Rules:\n"
-        "- Write one clean, user-facing answer (plain language; markdown lists ok).\n"
-        "- Do not output internal debate or role-play dialogue.\n"
-        "- If evidence is thin, state what the samples support and what would need another query.\n"
-        "- Keep the answer concise and decision-oriented.\n"
-    )
-
-
-def _system_prompt_moderator() -> str:
-    return (
-        "You are the Pulsecast discussion moderator.\n"
-        "You read a compact internal transcript: ANALYST opening plus Marketing/Finance/Challenger "
-        "messages from one completed round. You do NOT see raw SQL execution beyond what agents wrote.\n"
-        "Decide whether another round would materially improve insight quality (tension unresolved, "
-        "contradiction unaddressed, key angle missing) or whether the thread is ready for the Host to "
-        "synthesize.\n\n"
-        "You MUST return ONLY valid JSON (no markdown, no backticks, no extra text).\n"
-        "Schema:\n"
-        '{\n'
-        '  "continue_discussion": boolean,\n'
-        '  "reason": string,\n'
-        '  "focus_for_next_round": string|null\n'
-        "}\n\n"
-        "Rules:\n"
-        "- If continue_discussion is true, focus_for_next_round should be one short instruction "
-        "(what to stress or reconcile next round).\n"
-        "- If false, set focus_for_next_round to null.\n"
-        "- Be conservative: prefer stopping if the round already converged or repeated points.\n"
-    )
-
-
 def _human_prompt(*, ctx: dict[str, Any], prior: dict[str, _AgentOut]) -> str:
     prior_obj = {k: v.model_dump() for k, v in prior.items()}
     return (
@@ -475,7 +384,7 @@ async def _run_moderator_call(*, settings: Settings, user_content: str) -> _Mode
         text = await _stream_llm_text(
             settings=settings,
             messages=[
-                {"role": "system", "content": _system_prompt_moderator()},
+                {"role": "system", "content": system_prompt_moderator()},
                 {"role": "user", "content": user_content},
             ],
         )
@@ -550,7 +459,7 @@ async def _run_llm_agents_linear(
         out = await _run_role_call(
             settings=settings,
             role=role,
-            system_prompt=_system_prompt_internal(role, discussion_aware=False),
+            system_prompt=system_prompt_internal(role, discussion_aware=False),
             ctx=ctx,
             prior=prior,
         )
@@ -604,7 +513,7 @@ async def _run_llm_agents_linear(
     host_out = await _run_agent_json(
         settings,
         "HOST",
-        _system_prompt_host_composer(),
+        system_prompt_host_composer(),
         _host_user_prompt(ctx=ctx, discussion=discussion),
     )
     pipeline.append(
@@ -637,7 +546,7 @@ async def _run_llm_agents_moderated_discussion(
     analyst_out = await _run_agent_json(
         settings,
         "ANALYST",
-        _system_prompt_internal("ANALYST", discussion_aware=False),
+        system_prompt_internal("ANALYST", discussion_aware=False),
         _analyst_opening_prompt(ctx=ctx),
     )
     pipeline.append(
@@ -670,7 +579,7 @@ async def _run_llm_agents_moderated_discussion(
             out = await _run_agent_json(
                 settings,
                 role,
-                _system_prompt_internal(pr, discussion_aware=True),
+                system_prompt_internal(pr, discussion_aware=True),
                 user_content,
             )
             turns.append(DiscussionTurn(role=discussant, round_index=r, output=out))
@@ -721,7 +630,7 @@ async def _run_llm_agents_moderated_discussion(
     host_out = await _run_agent_json(
         settings,
         "HOST",
-        _system_prompt_host_composer(),
+        system_prompt_host_composer(),
         _host_user_prompt(ctx=ctx, discussion=discussion),
     )
     pipeline.append(
@@ -830,7 +739,7 @@ async def run_llm_agents_host_only(
     host_out = await _run_agent_json(
         settings,
         "HOST",
-        _system_prompt_host_composer(),
+        system_prompt_host_composer(),
         _host_user_prompt(ctx=ctx, discussion=discussion),
     )
     pipeline_out = [

@@ -31,6 +31,10 @@ from app.services.pulsecast_sse_emit import (
     emit_progress,
     emit_text_chunks,
 )
+from app.prompts.text_to_sql import (
+    TEXT_TO_SQL_SUB_QUESTION_RETRY_SUFFIX,
+    text_to_sql_sub_question_system_prompt,
+)
 from app.services.qa_pipeline import build_answer_summary, validate_and_normalize_sql
 
 
@@ -49,18 +53,10 @@ def sub_question_tts_messages(
     sub_question: str,
     retry_for_duplicate: bool = False,
 ) -> list[dict[str, str]]:
-    system = (
-        "You convert one analytics question into SQL for the configured warehouse.\n"
-        "Use only the provided sub-question as the target intent.\n"
-        "Return SQL for that intent only."
-    )
+    system = text_to_sql_sub_question_system_prompt()
     user = sub_question.strip()
     if retry_for_duplicate:
-        user = (
-            f"{user}\n\n"
-            "Retry instruction: previous SQL looked duplicated from another sub-question. "
-            "Generate SQL that is specific to this question intent."
-        )
+        user = f"{user}\n\n{TEXT_TO_SQL_SUB_QUESTION_RETRY_SUFFIX}"
     return [
         {"role": "system", "content": system},
         {"role": "user", "content": user},

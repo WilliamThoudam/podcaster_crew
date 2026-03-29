@@ -11,6 +11,11 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.config import Settings
 from app.llm.chat_model import build_chat_model
 from app.models.schemas import PlanningAnalystOutput, PlanningHostOutput
+from app.prompts.planning import (
+    planning_analyst_system_prompt,
+    planning_analyst_system_prompt_strict,
+    planning_host_system_prompt,
+)
 
 
 class _HostOut(BaseModel):
@@ -51,65 +56,11 @@ def _clean_sub_question(text: str) -> str:
     return s
 
 
-def _host_system_prompt() -> str:
-    return (
-        "You are the HOST agent in a Pulsecast analytics panel.\n"
-        "Your job is to restate the user's question, clarify the business focus, and set constraints "
-        "for downstream analysis.\n\n"
-        "You MUST return ONLY valid JSON (no markdown, no backticks, no extra text).\n"
-        'Schema:\n'
-        '{\n'
-        '  "primary_focus": string,\n'
-        '  "time_window": string|null,\n'
-        '  "region_focus": string|null,\n'
-        '  "metrics": string[],\n'
-        '  "notes": string|null\n'
-        "}\n"
-        "Rules:\n"
-        "- primary_focus: 1-2 sentences summarising what decision or insight the user cares about.\n"
-        "- time_window: if the question implies a period (e.g. last year, last 12 months), capture it; "
-        "otherwise null.\n"
-        "- region_focus: capture specific region/market mentions (e.g. Europe, North region); otherwise null.\n"
-        "- metrics: list key business measures mentioned or obviously implied (e.g. sales value, volume, margin).\n"
-        "- notes: optional guardrails or assumptions for the analyst.\n"
-    )
-
-
 def _host_user_prompt(question: str) -> str:
     return (
         "User question:\n"
         f"{json.dumps(question, ensure_ascii=False)}\n\n"
         "Analyse this question and fill the JSON schema."
-    )
-
-
-def _analyst_system_prompt() -> str:
-    return (
-        "You are the ANALYST agent in a Pulsecast analytics panel.\n"
-        "Your job is to decompose the framed business question into 2-6 concrete, independently SQL-answerable "
-        "sub-questions.\n\n"
-        "You MUST return ONLY valid JSON (no markdown, no backticks, no extra text).\n"
-        'Schema:\n'
-        '{\n'
-        '  "sub_questions": string[],\n'
-        '  "rationale": string|null\n'
-        "}\n"
-        "Rules for each sub_question:\n"
-        "- It MUST be answerable with a single SELECT/WITH query against a sales data warehouse.\n"
-        "- Write each sub_question in plain English only.\n"
-        "- DO NOT output SQL keywords, SQL snippets, CTEs, or code blocks.\n"
-        "- Be explicit about the metric(s), time window, region/product filters, and whether you need a TOP N.\n"
-        "- Prefer 2-6 sub_questions. Fewer is better if they fully answer the intent.\n"
-        "- Avoid referencing previous answers; each sub_question stands alone.\n"
-    )
-
-
-def _analyst_system_prompt_strict() -> str:
-    return (
-        _analyst_system_prompt()
-        + "\nSTRICT FAILURE CONDITION:\n"
-        + "- If any sub_question contains SQL syntax, your response is invalid.\n"
-        + "- Every sub_question must read like a business question a non-technical user can understand.\n"
     )
 
 
@@ -166,7 +117,7 @@ async def run_host_planner(*, settings: Settings, question: str) -> PlanningHost
     try:
         content = await _invoke_json_object(
             settings=settings,
-            system_prompt=_host_system_prompt(),
+            system_prompt=planning_host_system_prompt(),
             user_prompt=_host_user_prompt(question),
         )
         data = json.loads(content)
@@ -192,7 +143,7 @@ async def run_analyst_planner(
         return _AnalystOut.model_validate(data)
 
     try:
-        out = await _call_planner(_analyst_system_prompt())
+        out = await _call_planner(planning_analyst_system_prompt())
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -204,7 +155,7 @@ async def run_analyst_planner(
     has_sqlish = any(_looks_like_sql(q) for q in cleaned)
     if has_sqlish:
         try:
-            out = await _call_planner(_analyst_system_prompt_strict())
+            out = await _call_planner(planning_analyst_system_prompt_strict())
             cleaned = [_clean_sub_question(q) for q in out.sub_questions if q and _clean_sub_question(q)]
         except Exception:
             pass

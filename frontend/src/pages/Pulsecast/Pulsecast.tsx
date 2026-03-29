@@ -2,7 +2,7 @@ import { useLayoutEffect, useRef } from 'react'
 import { Navigate, useNavigate, useParams } from 'react-router-dom'
 import { paths } from '../../routes/paths'
 import { type Screen, isPulsecastScreen } from '../../types'
-import { PODCAST_SCRIPT, TOTAL_MS } from './constants'
+import { AGENTS, PODCAST_SCRIPT, TOTAL_MS } from './constants'
 import { formatQaClock } from './utils'
 import { usePulsecastApp } from './hooks/usePulsecastApp'
 import { PulsecastMarkdown } from './components/PulsecastMarkdown'
@@ -555,14 +555,13 @@ export function Pulsecast() {
               <div className="status-panel">
                 <div>
                   <div className="status-section-title">Agent Status</div>
-                  {['Host', 'Analyst', 'Marketing', 'Finance', 'Challenger'].map((name, i) => {
-                    const emoji = ['🎤', '📊', '📣', '💰', '⚖️'][i]
+                  {AGENTS.map((agent, i) => {
                     const st = app.agentStates[i] ?? 'idle'
                     return (
-                      <div key={name} className="agent-status-row">
+                      <div key={agent.name} className="agent-status-row">
                         <div className={`agent-status-dot ${st}`} />
                         <div className="agent-status-name">
-                          {emoji} {name}
+                          {agent.emoji} {agent.name}
                         </div>
                         <div className="agent-status-state">{st}</div>
                       </div>

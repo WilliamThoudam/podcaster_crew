@@ -37,6 +37,7 @@ from app.services.pulsecast_completion_types import (
 )
 from app.services.pulsecast_llm_agents import (
     LlmAgentsPaused,
+    LlmAgentsPausedWebSearch,
     run_llm_agents_after_web_hitl,
     run_llm_agents_host_only,
 )
@@ -492,9 +493,51 @@ async def build_resume_web_search_payload(
         approved=approved,
         edited_search_query=edited_question,
         proposed_search_query=snapshot.proposed_search_query,
+        search_queries=list(snapshot.search_queries),
+        pending_search_index=snapshot.pending_search_index,
+        completed_web_results=list(snapshot.completed_web_results),
+        hitl_rationale=snapshot.rationale,
         allow_sql_approval_pause=True,
         on_progress=on_progress,
     )
+    if isinstance(agents_out, LlmAgentsPausedWebSearch):
+        snap_ws = WebSearchPausedSnapshot(
+            pipeline=agents_out.pipeline,
+            discussion=agents_out.discussion,
+            question=agents_out.question,
+            generated_sql=agents_out.generated_sql,
+            primary_exe=agents_out.primary_exe,
+            deterministic_summary=agents_out.deterministic_summary,
+            sub_results=agents_out.sub_results,
+            host_plan=agents_out.host_plan,
+            analyst_plan=agents_out.analyst_plan,
+            proposed_search_query=agents_out.proposed_search_query,
+            search_queries=agents_out.search_queries,
+            pending_search_index=agents_out.pending_search_index,
+            completed_web_results=agents_out.completed_web_results,
+            rationale=agents_out.rationale,
+            openai_user=snapshot.openai_user,
+        )
+        token_ws = resume_store.issue_token(snap_ws)
+        n = len(agents_out.search_queries)
+        step = agents_out.pending_search_index + 1
+        await emit_progress(
+            on_progress,
+            {
+                "type": "web_search_approval_required",
+                "resume_token": token_ws,
+                "proposed_search_query": agents_out.proposed_search_query,
+                "rationale": agents_out.rationale,
+                "pause_kind": "web_search",
+                "web_search_step_index": step,
+                "web_search_total_steps": max(1, n),
+            },
+        )
+        return CompletionStreamPaused(
+            resume_token=token_ws,
+            proposed_sub_question=agents_out.proposed_search_query,
+            rationale=agents_out.rationale,
+        )
     if isinstance(agents_out, LlmAgentsPaused):
         snap2 = PulsecastPausedSnapshot(
             pipeline=agents_out.pipeline,

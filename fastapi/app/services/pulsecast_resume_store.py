@@ -153,7 +153,7 @@ class PulsecastPausedSnapshot:
 
 @dataclass
 class WebSearchPausedSnapshot:
-    """Resume after web_search_approval_required (HITL) — Serper, then Challenger + Host."""
+    """Resume after web_search_approval_required (HITL) — Serper per step, then Challenger + Host."""
 
     pipeline: list[AgentPipelineStep]
     discussion: DiscussionState
@@ -165,6 +165,9 @@ class WebSearchPausedSnapshot:
     host_plan: PlanningHostOutput
     analyst_plan: PlanningAnalystOutput
     proposed_search_query: str
+    search_queries: list[str]
+    pending_search_index: int
+    completed_web_results: list[dict[str, Any]]
     rationale: str | None
     openai_user: str | None
 
@@ -184,6 +187,9 @@ class WebSearchPausedSnapshot:
             "host_plan": self.host_plan.model_dump(mode="json"),
             "analyst_plan": self.analyst_plan.model_dump(mode="json"),
             "proposed_search_query": self.proposed_search_query,
+            "search_queries": list(self.search_queries),
+            "pending_search_index": self.pending_search_index,
+            "completed_web_results": list(self.completed_web_results),
             "rationale": self.rationale,
             "openai_user": self.openai_user,
         }
@@ -195,6 +201,15 @@ class WebSearchPausedSnapshot:
         discussion = DiscussionState(analyst=analyst, turns=turns)
         pipeline = [AgentPipelineStep.model_validate(x) for x in d["pipeline"]]
         sub_results = [SubResult.model_validate(x) for x in d["sub_results"]]
+        proposed = str(d.get("proposed_search_query") or "").strip()
+        raw_sqs = d.get("search_queries")
+        if isinstance(raw_sqs, list) and len(raw_sqs) > 0:
+            search_queries = [str(x).strip() for x in raw_sqs if str(x).strip()]
+        else:
+            search_queries = [proposed] if proposed else []
+        pending = int(d.get("pending_search_index", 0))
+        cw = d.get("completed_web_results")
+        completed_web_results: list[dict[str, Any]] = cw if isinstance(cw, list) else []
         return WebSearchPausedSnapshot(
             pipeline=pipeline,
             discussion=discussion,
@@ -206,6 +221,9 @@ class WebSearchPausedSnapshot:
             host_plan=PlanningHostOutput.model_validate(d["host_plan"]),
             analyst_plan=PlanningAnalystOutput.model_validate(d["analyst_plan"]),
             proposed_search_query=d["proposed_search_query"],
+            search_queries=search_queries,
+            pending_search_index=pending,
+            completed_web_results=completed_web_results,
             rationale=d.get("rationale"),
             openai_user=d.get("openai_user"),
         )

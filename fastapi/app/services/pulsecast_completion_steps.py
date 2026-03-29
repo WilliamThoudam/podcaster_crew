@@ -487,10 +487,15 @@ async def phase_agents_finalize(
             host_plan=agents_out.host_plan,
             analyst_plan=agents_out.analyst_plan,
             proposed_search_query=agents_out.proposed_search_query,
+            search_queries=agents_out.search_queries,
+            pending_search_index=agents_out.pending_search_index,
+            completed_web_results=agents_out.completed_web_results,
             rationale=agents_out.rationale,
             openai_user=req.user,
         )
         token = resume_store.issue_token(snap)
+        n = len(agents_out.search_queries)
+        step = agents_out.pending_search_index + 1
         await emit_progress(
             on_progress,
             {
@@ -499,6 +504,8 @@ async def phase_agents_finalize(
                 "proposed_search_query": agents_out.proposed_search_query,
                 "rationale": agents_out.rationale,
                 "pause_kind": "web_search",
+                "web_search_step_index": step,
+                "web_search_total_steps": max(1, n),
             },
         )
         return CompletionStreamPaused(

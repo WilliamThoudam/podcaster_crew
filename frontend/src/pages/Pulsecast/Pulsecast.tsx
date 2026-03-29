@@ -583,6 +583,13 @@ export function Pulsecast() {
                 ? 'Approve web search'
                 : 'Approve follow-up SQL'}
           </h3>
+          {app.sqlHitlPauseKind === 'web_search' &&
+          app.sqlHitlWebSearchTotal != null &&
+          app.sqlHitlWebSearchTotal > 1 ? (
+            <p className="sql-hitl-rationale" style={{ color: 'var(--text2)', fontSize: '0.9rem' }}>
+              Web search {app.sqlHitlWebSearchStep ?? '?'} of {app.sqlHitlWebSearchTotal}
+            </p>
+          ) : null}
           <p>
             {app.sqlHitlPauseKind === 'duplicate_sub_question'
               ? 'Text-to-SQL matched an earlier step. The analyst suggested a different sub-question. Approve to run it (you may edit), or decline to skip this step and continue the plan.'

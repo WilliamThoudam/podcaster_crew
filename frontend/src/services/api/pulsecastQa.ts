@@ -96,6 +96,9 @@ export type StreamQaOutcome =
       proposed_sub_question: string
       rationale: string | null
       pause_kind?: SqlHitlPauseKind
+      /** Present when pause_kind is web_search and the plan has multiple Serper steps */
+      web_search_step_index?: number
+      web_search_total_steps?: number
     }
 
 export type PulsecastResumeRequestBody = {
@@ -174,6 +177,8 @@ export type StreamProgressEvent =
       proposed_search_query: string
       rationale?: string | null
       pause_kind?: 'web_search'
+      web_search_step_index?: number
+      web_search_total_steps?: number
     }
   | { type: 'sql_followup_declined' }
   | { type: 'web_search_declined' }
@@ -250,6 +255,8 @@ type ConsumeSseResult =
       proposed_sub_question: string
       rationale: string | null
       pause_kind: SqlHitlPauseKind
+      web_search_step_index?: number
+      web_search_total_steps?: number
     }
 
 async function consumeSseChatStream(
@@ -268,6 +275,8 @@ async function consumeSseChatStream(
         proposed_sub_question: string
         rationale: string | null
         pause_kind: SqlHitlPauseKind
+        web_search_step_index?: number
+        web_search_total_steps?: number
       }
     | undefined
 
@@ -305,6 +314,8 @@ async function consumeSseChatStream(
                 proposed_sub_question: event.proposed_search_query,
                 rationale: event.rationale ?? null,
                 pause_kind: 'web_search',
+                web_search_step_index: event.web_search_step_index,
+                web_search_total_steps: event.web_search_total_steps,
               }
             }
             callbacks?.onProgress?.(event)
@@ -327,6 +338,8 @@ async function consumeSseChatStream(
         proposed_sub_question: sqlApproval.proposed_sub_question,
         rationale: sqlApproval.rationale,
         pause_kind: sqlApproval.pause_kind,
+        web_search_step_index: sqlApproval.web_search_step_index,
+        web_search_total_steps: sqlApproval.web_search_total_steps,
       }
     }
     throw new Error('No assistant content received from stream')
@@ -373,6 +386,8 @@ export async function streamPulsecastQa(
       proposed_sub_question: raw.proposed_sub_question,
       rationale: raw.rationale,
       pause_kind: raw.pause_kind,
+      web_search_step_index: raw.web_search_step_index,
+      web_search_total_steps: raw.web_search_total_steps,
     }
   }
   return { kind: 'complete', answer: raw.assembled }
@@ -414,6 +429,8 @@ export async function streamPulsecastResume(
       proposed_sub_question: raw.proposed_sub_question,
       rationale: raw.rationale,
       pause_kind: raw.pause_kind,
+      web_search_step_index: raw.web_search_step_index,
+      web_search_total_steps: raw.web_search_total_steps,
     }
   }
   return { kind: 'complete', answer: raw.assembled }

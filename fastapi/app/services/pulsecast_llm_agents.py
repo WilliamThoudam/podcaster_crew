@@ -131,6 +131,7 @@ class _AgentOut(BaseModel):
     new_question_rationale: str | None = None
     needs_web_search: bool = False
     search_query: str | None = None
+    search_queries: list[str] | None = None
     web_search_rationale: str | None = None
 
     @model_validator(mode="before")
@@ -279,6 +280,12 @@ def _normalize_panel_agent_out_dict(obj: dict[str, Any]) -> dict[str, Any]:
         out["search_query"] = sq
     else:
         out["search_query"] = None
+    sqlist = out.get("search_queries")
+    if isinstance(sqlist, list):
+        cleaned_sq = [str(x).strip() for x in sqlist if str(x).strip()]
+        out["search_queries"] = cleaned_sq if cleaned_sq else None
+    else:
+        out["search_queries"] = None
     wsr = _coerce_optional_str(out.get("web_search_rationale"))
     if wsr and str(wsr).strip():
         out["web_search_rationale"] = wsr
@@ -286,6 +293,44 @@ def _normalize_panel_agent_out_dict(obj: dict[str, Any]) -> dict[str, Any]:
         out["web_search_rationale"] = None
 
     return out
+
+
+def _web_search_queries_for_hitl(
+    wc_out: _AgentOut,
+    analyst_plan: PlanningAnalystOutput | None,
+) -> list[str]:
+    """One Serper call per entry; prefer model `search_queries`, else single `search_query`, else planner lines."""
+    if wc_out.search_queries:
+        return list(wc_out.search_queries)
+    sq = (wc_out.search_query or "").strip()
+    if sq:
+        return [sq]
+    if analyst_plan and analyst_plan.web_sub_questions:
+        return [str(x).strip() for x in analyst_plan.web_sub_questions if str(x).strip()]
+    return []
+
+
+def _merge_completed_web_into_ctx(ctx: dict[str, Any], completed: list[dict[str, Any]]) -> None:
+    """Flatten organic rows with source_query + keep per-query grouping for prompts."""
+    by_q: list[dict[str, Any]] = []
+    flat: list[dict[str, Any]] = []
+    for item in completed:
+        q = str(item.get("query") or "").strip()
+        err = item.get("error")
+        res = item.get("results")
+        rows: list[dict[str, Any]] = res if isinstance(res, list) else []
+        by_q.append({"query": q, "error": err, "results": rows})
+        if err:
+            continue
+        for row in rows:
+            if isinstance(row, dict):
+                d = dict(row)
+                d["source_query"] = q
+                flat.append(d)
+    if by_q:
+        ctx["web_search_results_by_query"] = by_q
+    if flat:
+        ctx["web_search_results"] = flat
 
 
 def _normalize_host_out_dict(obj: dict[str, Any]) -> dict[str, Any]:
@@ -730,6 +775,9 @@ class LlmAgentsPausedWebSearch:
     host_plan: PlanningHostOutput
     analyst_plan: PlanningAnalystOutput
     proposed_search_query: str
+    search_queries: list[str]
+    pending_search_index: int
+    completed_web_results: list[dict[str, Any]]
     rationale: str | None
 
 
@@ -850,8 +898,8 @@ async def _run_llm_agents_linear(
         elif role in ("MARKETING", "FINANCE", "WEB_CRAWLER", "CHALLENGER"):
             await _sse_discussion_turn(on_progress, role, 1, out)
         if role == "WEB_CRAWLER" and _serper_configured(settings):
-            sq = (out.search_query or "").strip()
-            if out.needs_web_search and sq and host_plan is not None and analyst_plan is not None:
+            queries = _web_search_queries_for_hitl(out, analyst_plan)
+            if out.needs_web_search and queries and host_plan is not None and analyst_plan is not None:
                 ds = discussion_state_from_legacy_prior(prior)
                 if ds is None:
                     raise HTTPException(
@@ -868,7 +916,10 @@ async def _run_llm_agents_linear(
                     sub_results=sr_list,
                     host_plan=host_plan,
                     analyst_plan=analyst_plan,
-                    proposed_search_query=sq,
+                    proposed_search_query=queries[0],
+                    search_queries=queries,
+                    pending_search_index=0,
+                    completed_web_results=[],
                     rationale=out.web_search_rationale,
                 )
         if role == "CHALLENGER" and allow_sql_approval_pause:
@@ -1040,10 +1091,10 @@ async def _run_llm_agents_moderated_discussion(
             )
             await _sse_discussion_turn(on_progress, "WEB_CRAWLER", r, wc_out)
             if _serper_configured(settings):
-                sq = (wc_out.search_query or "").strip()
+                queries = _web_search_queries_for_hitl(wc_out, analyst_plan)
                 if (
                     wc_out.needs_web_search
-                    and sq
+                    and queries
                     and host_plan is not None
                     and analyst_plan is not None
                 ):
@@ -1057,7 +1108,10 @@ async def _run_llm_agents_moderated_discussion(
                         sub_results=sr_list,
                         host_plan=host_plan,
                         analyst_plan=analyst_plan,
-                        proposed_search_query=sq,
+                        proposed_search_query=queries[0],
+                        search_queries=queries,
+                        pending_search_index=0,
+                        completed_web_results=[],
                         rationale=wc_out.web_search_rationale,
                     )
             hitl = await _run_one_discussant(discussant="CHALLENGER", round_index=r)
@@ -1247,10 +1301,23 @@ async def run_llm_agents_after_web_hitl(
     approved: bool,
     edited_search_query: str | None,
     proposed_search_query: str,
+    search_queries: list[str],
+    pending_search_index: int,
+    completed_web_results: list[dict[str, Any]],
+    hitl_rationale: str | None,
     allow_sql_approval_pause: bool,
     on_progress: AgentProgressCallback = None,
-) -> Union[LlmAgentsComplete, LlmAgentsPaused]:
-    """After web-search HITL: Serper (if approved), then CHALLENGER + HOST."""
+) -> Union[LlmAgentsComplete, LlmAgentsPaused, LlmAgentsPausedWebSearch]:
+    """After web-search HITL: Serper for current step (if approved); may pause again for next query; then CHALLENGER + HOST."""
+    queries = [x.strip() for x in search_queries if str(x).strip()]
+    if not queries and (proposed_search_query or "").strip():
+        queries = [(proposed_search_query or "").strip()]
+    idx = pending_search_index
+    if idx < 0:
+        idx = 0
+    if queries and idx >= len(queries):
+        idx = len(queries) - 1
+
     ctx = _context_blob_compact(
         question=question,
         generated_sql=generated_sql,
@@ -1260,41 +1327,69 @@ async def run_llm_agents_after_web_hitl(
         host_plan=host_plan,
         analyst_plan=analyst_plan,
     )
-    if approved:
-        q = (edited_search_query or "").strip() or (proposed_search_query or "").strip()
-        if q:
-            try:
-                results = await serper_google_search(settings=settings, query=q, num=8)
-                ctx["web_search_query_used"] = q
-                ctx["web_search_results"] = results
-            except Exception as e:
-                ctx["web_search_error"] = str(e)
-                ctx["web_search_query_attempted"] = q
-    else:
-        ctx["user_declined_web_search"] = True
-        ctx["hitl_note"] = (
-            "The user declined to run a public web search. Answer using warehouse samples and "
-            "prior panel notes only; do not imply external web results were retrieved."
-        )
+    completed = [dict(x) for x in completed_web_results]
 
     if not approved:
+        _merge_completed_web_into_ctx(ctx, completed)
+        ctx["user_declined_web_search"] = True
+        ctx["hitl_note"] = (
+            "The user declined to run a public web search (or this step). Answer using warehouse samples and "
+            "prior panel notes only; do not imply external web results were retrieved."
+        )
         _md = _serper_results_markdown(query="", results=None, error=None, declined=True)
         await _emit_web_search_results_sse(on_progress, query=None, markdown_body=_md)
     else:
-        _q = (edited_search_query or "").strip() or (proposed_search_query or "").strip()
-        _err = ctx.get("web_search_error")
-        if _err:
-            _md = _serper_results_markdown(query=_q, results=None, error=str(_err), declined=False)
+        q = (edited_search_query or "").strip() or (proposed_search_query or "").strip()
+        step_results: list[dict[str, Any]] | None = None
+        step_err: str | None = None
+        if q:
+            try:
+                step_results = await serper_google_search(settings=settings, query=q, num=8)
+                completed.append({"query": q, "results": step_results, "error": None})
+            except Exception as e:
+                step_err = str(e)
+                completed.append({"query": q, "results": None, "error": step_err})
+                ctx["web_search_error"] = step_err
+                ctx["web_search_query_attempted"] = q
+        else:
+            completed.append({"query": "", "results": None, "error": "empty query after approval"})
+
+        _q = q
+        if step_err:
+            _md = _serper_results_markdown(query=_q, results=None, error=str(step_err), declined=False)
         elif not _q:
             _md = "_No search query was available after approval._"
         else:
             _md = _serper_results_markdown(
                 query=_q,
-                results=ctx.get("web_search_results"),
+                results=step_results,
                 error=None,
                 declined=False,
             )
         await _emit_web_search_results_sse(on_progress, query=_q or None, markdown_body=_md)
+
+        more = bool(queries) and (idx + 1) < len(queries)
+        if more:
+            return LlmAgentsPausedWebSearch(
+                pipeline=pipeline,
+                discussion=discussion,
+                question=question,
+                generated_sql=generated_sql,
+                primary_exe=exe,
+                deterministic_summary=deterministic_summary,
+                sub_results=sub_results,
+                host_plan=host_plan,
+                analyst_plan=analyst_plan,
+                proposed_search_query=queries[idx + 1],
+                search_queries=queries,
+                pending_search_index=idx + 1,
+                completed_web_results=completed,
+                rationale=hitl_rationale,
+            )
+
+        _merge_completed_web_into_ctx(ctx, completed)
+        if queries:
+            ctx["web_search_query_used"] = "; ".join(queries)
 
     prior: dict[str, _AgentOut] = {"ANALYST": discussion.analyst}
     for t in discussion.turns:

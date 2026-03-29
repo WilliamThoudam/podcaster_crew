@@ -555,6 +555,8 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
   const [sqlHitlEdited, setSqlHitlEdited] = useState('')
   const [sqlHitlRationale, setSqlHitlRationale] = useState<string | null>(null)
   const [sqlHitlPauseKind, setSqlHitlPauseKind] = useState<SqlHitlPauseKind>('challenger_followup')
+  const [sqlHitlWebSearchStep, setSqlHitlWebSearchStep] = useState<number | null>(null)
+  const [sqlHitlWebSearchTotal, setSqlHitlWebSearchTotal] = useState<number | null>(null)
 
   const [toast, setToast] = useState<{ message: string; visible: boolean }>({
     message: '',
@@ -793,10 +795,14 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
           setSqlHitlEdited(result.proposed_sub_question)
           setSqlHitlProposed(result.proposed_sub_question)
           setSqlHitlRationale(result.rationale)
+          setSqlHitlWebSearchStep(result.web_search_step_index ?? null)
+          setSqlHitlWebSearchTotal(result.web_search_total_steps ?? null)
           setSqlHitlOpen(true)
           return
         }
         setSqlHitlPauseKind('challenger_followup')
+        setSqlHitlWebSearchStep(null)
+        setSqlHitlWebSearchTotal(null)
         if (!stream.getTypingBubbleCreated()) {
           setQaMessages((m) => [
             ...m,
@@ -876,6 +882,8 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
           setSqlHitlProposed(result.proposed_sub_question)
           setSqlHitlEdited(result.proposed_sub_question)
           setSqlHitlRationale(result.rationale)
+          setSqlHitlWebSearchStep(result.web_search_step_index ?? null)
+          setSqlHitlWebSearchTotal(result.web_search_total_steps ?? null)
           setSqlHitlOpen(true)
           return
         }
@@ -885,6 +893,8 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
         setSqlHitlEdited('')
         setSqlHitlRationale(null)
         setSqlHitlPauseKind('challenger_followup')
+        setSqlHitlWebSearchStep(null)
+        setSqlHitlWebSearchTotal(null)
         if (!stream.getTypingBubbleCreated()) {
           setQaMessages((m) => [
             ...m,
@@ -1037,6 +1047,8 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
     setSqlHitlEdited,
     sqlHitlRationale,
     sqlHitlPauseKind,
+    sqlHitlWebSearchStep,
+    sqlHitlWebSearchTotal,
     submitSqlHitl,
     qaInput,
     setQaInput,

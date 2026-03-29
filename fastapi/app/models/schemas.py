@@ -53,6 +53,9 @@ class ExecuteSqlResponse(BaseModel):
     data: list[dict[str, Any]] = Field(default_factory=list)
 
 
+DiscussionDepth = Literal["minimal", "linear", "moderated"]
+
+
 class PlanningHostOutput(BaseModel):
     """High-level framing from the HOST agent used to steer Analyst planning."""
 
@@ -61,6 +64,7 @@ class PlanningHostOutput(BaseModel):
     region_focus: str | None = None
     metrics: list[str] = Field(default_factory=list)
     notes: str | None = None
+    discussion_depth: DiscussionDepth = "moderated"
 
 
 class PlanningAnalystOutput(BaseModel):

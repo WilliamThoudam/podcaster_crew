@@ -17,7 +17,8 @@ def planning_host_system_prompt() -> str:
         '  "time_window": string|null,\n'
         '  "region_focus": string|null,\n'
         '  "metrics": string[],\n'
-        '  "notes": string|null\n'
+        '  "notes": string|null,\n'
+        '  "discussion_depth": "minimal" | "linear" | "moderated"\n'
         "}\n"
         "Rules:\n"
         "- primary_focus: 1-2 sentences summarising what decision or insight the user cares about.\n"
@@ -26,6 +27,13 @@ def planning_host_system_prompt() -> str:
         "- region_focus: capture specific region/market mentions (e.g. Europe, North region); otherwise null.\n"
         "- metrics: list key business measures mentioned or obviously implied (e.g. sales value, volume, margin).\n"
         "- notes: optional guardrails or assumptions for the analyst.\n"
+        "- discussion_depth: choose exactly one:\n"
+        '  - "minimal": simple lookups, distinct lists, enumerations (e.g. "list all countries"), '
+        "schema exploration, or one narrow factual slice where Marketing/Finance/Challenger lenses add no value.\n"
+        '  - "linear": one pass each of Marketing, Finance, and Challenger after the Analyst — no multi-round '
+        "debate or moderator.\n"
+        '  - "moderated": multi-faceted analytics, drivers, tradeoffs, tensions, or cases where extra rounds '
+        "with a moderator could improve insight.\n"
     )
 
 

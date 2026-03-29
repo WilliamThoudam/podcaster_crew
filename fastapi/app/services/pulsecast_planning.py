@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import HTTPException, status
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -31,6 +31,7 @@ class _HostOut(BaseModel):
     region_focus: str | None = None
     metrics: list[str] = Field(default_factory=list)
     notes: str | None = None
+    discussion_depth: Literal["minimal", "linear", "moderated"] = "moderated"
 
 
 class _AnalystOut(BaseModel):
@@ -85,6 +86,7 @@ def _analyst_user_prompt(question: str, host: PlanningHostOutput) -> str:
             "region_focus": host.region_focus,
             "metrics": host.metrics,
             "notes": host.notes,
+            "discussion_depth": host.discussion_depth,
         },
     }
     return (
@@ -210,6 +212,7 @@ def _duplicate_rephrase_user_payload(
             "region_focus": host.region_focus,
             "metrics": host.metrics,
             "notes": host.notes,
+            "discussion_depth": host.discussion_depth,
         },
         "planned_sub_questions": list(analyst_plan.sub_questions),
         "prior_sub_question_results": prior,

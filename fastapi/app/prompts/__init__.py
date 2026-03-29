@@ -2,6 +2,7 @@
 
 from app.prompts.llm_agents import (
     system_prompt_host_composer,
+    system_prompt_host_composer_minimal,
     system_prompt_internal,
     system_prompt_moderator,
 )
@@ -18,6 +19,7 @@ __all__ = [
     "planning_host_system_prompt",
     "text_to_sql_sub_question_system_prompt",
     "system_prompt_host_composer",
+    "system_prompt_host_composer_minimal",
     "system_prompt_internal",
     "system_prompt_moderator",
 ]

@@ -13,6 +13,7 @@ from app.config import Settings
 from app.llm.chat_model import build_chat_model
 from app.prompts.llm_agents import (
     system_prompt_host_composer,
+    system_prompt_host_composer_minimal,
     system_prompt_internal,
     system_prompt_moderator,
 )
@@ -346,6 +347,7 @@ def _context_blob_compact(
             "region_focus": host_plan.region_focus,
             "metrics": host_plan.metrics,
             "notes": host_plan.notes,
+            "discussion_depth": host_plan.discussion_depth,
         }
     if analyst_plan:
         base["analyst_plan"] = {
@@ -604,6 +606,57 @@ def discussion_state_from_legacy_prior(prior: dict[str, _AgentOut]) -> Discussio
     return DiscussionState(analyst=analyst, turns=turns)
 
 
+async def _run_llm_agents_minimal(
+    *,
+    settings: Settings,
+    ctx: dict[str, Any],
+    on_progress: AgentProgressCallback,
+) -> LlmAgentsComplete:
+    """ANALYST then HOST only. No Marketing/Finance/Challenger — no CHALLENGER sql_approval_pause."""
+    pipeline: list[AgentPipelineStep] = []
+    analyst_out = await _run_panel_agent_json(
+        settings,
+        "ANALYST",
+        system_prompt_internal("ANALYST", discussion_aware=False),
+        _analyst_opening_prompt(ctx=ctx),
+    )
+    pipeline.append(
+        AgentPipelineStep(
+            id=_agent_id("ANALYST"),
+            status="completed",
+            phase=analyst_out.phase,
+            detail=analyst_out.detail,
+        )
+    )
+    await _sse_discussion_analyst(on_progress, analyst_out)
+    for role in ("MARKETING", "FINANCE", "CHALLENGER"):
+        pr: PulsecastRole = role  # MARKETING|FINANCE|CHALLENGER
+        pipeline.append(
+            AgentPipelineStep(
+                id=_agent_id(pr),
+                status="skipped",
+                phase="Skipped (minimal)",
+                detail=None,
+            )
+        )
+    discussion = DiscussionState(analyst=analyst_out, turns=[])
+    host_out = await _run_host_json(
+        settings,
+        "HOST",
+        system_prompt_host_composer_minimal(),
+        _host_user_prompt(ctx=ctx, discussion=discussion),
+    )
+    pipeline.append(
+        AgentPipelineStep(
+            id=_agent_id("HOST"),
+            status="completed",
+            phase=host_out.phase,
+            detail=host_out.detail,
+        )
+    )
+    return LlmAgentsComplete(answer=host_out.text, pipeline=pipeline, messages=[AgentInsight(role="HOST", text=host_out.text)])
+
+
 async def _run_llm_agents_linear(
     *,
     settings: Settings,
@@ -828,8 +881,9 @@ async def run_llm_agents(
 ) -> Union[LlmAgentsComplete, LlmAgentsPaused]:
     """
     Run internal enrichment, then HOST.
-    When pulsecast_discussion_enabled: ANALYST once, then moderated M→F→C rounds (cap), else linear chain.
-    If CHALLENGER requests more data and allow_sql_approval_pause, return LlmAgentsPaused (no HOST yet).
+    Routing uses host_plan.discussion_depth: minimal (ANALYST→HOST), linear (single M→F→C pass), or moderated
+    (multi-round when pulsecast_discussion_enabled). If moderated but discussion is globally disabled, uses linear.
+    If CHALLENGER requests more data and allow_sql_approval_pause, return LlmAgentsPaused (no HOST yet) — not on minimal path.
     """
     sr_list = list(sub_results) if sub_results is not None else []
 
@@ -843,8 +897,17 @@ async def run_llm_agents(
         analyst_plan=analyst_plan,
     )
 
+    depth = host_plan.discussion_depth if host_plan else "moderated"
+    if depth == "minimal":
+        return await _run_llm_agents_minimal(
+            settings=settings,
+            ctx=ctx,
+            on_progress=on_progress,
+        )
+
     max_rounds = max(1, settings.pulsecast_discussion_max_rounds)
-    if settings.pulsecast_discussion_enabled:
+    use_moderated = depth == "moderated" and settings.pulsecast_discussion_enabled
+    if use_moderated:
         return await _run_llm_agents_moderated_discussion(
             settings=settings,
             question=question,

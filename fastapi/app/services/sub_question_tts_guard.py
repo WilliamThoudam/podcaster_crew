@@ -38,19 +38,31 @@ _META_ASK = re.compile(
 # after model prompt rules — keeps Challenger/HITL from opening SQL approval for faux warehouse asks.
 _NON_WAREHOUSE_ASK = re.compile(
     r"(?ix)"
+    # News / media / press
     r"(\bnews\s+(?:article|articles|coverage|story|stories|headline|headlines)\b)"
     r"|(\bmedia\s+coverage\b)"
     r"|(\bpress\s+(?:release|releases|coverage)\b)"
     r"|(\bpublic\s+(?:announcement|statement)\b)"
+    # Recalls
     r"|(\bproduct\s+recall\b|\bsafety\s+recall\b|\brecall\s+(?:notice|announcement|campaign)\b)"
     r"|(\b(?:fda|nhtsa|cpsc)\s+recall\b)"
-    r"|(\bregulatory\s+(?:filing|announcement|action)\b)"
+    # Regulatory / competitor / comms
+    r"|(\bregulatory\s+(?:filing|announcement|action|change|impact|environment|framework)\b)"
     r"|(\bcompetitor\s+(?:news|announcement|press)\b)"
     r"|(\binternal\s+comm(?:s|unications)?\b)"
     r"|(\bslack\b|\bemail\s+thread\b|\bteams\s+message\b)"
     r"|(\bpr\s+event\b|\bpress\s+event\b)"
     r"|(\bweb\s+search\s+results?\b)"
     r"|(\b(?:fetch|list|pull)\s+(?:the\s+)?(?:latest\s+)?(?:news|articles|press)\b)"
+    # Abstract concepts not measurable from a sales/ops mart
+    r"|(\bcompetition\s+intensity\b)"
+    r"|(\bcompetitive\s+(?:landscape|pressure|dynamics)\b)"
+    r"|(\beconomic\s+(?:indicator|indicators|factor|factors|condition|conditions)\b)"
+    r"|(\bconsumer\s+(?:preference|preferences|sentiment|perception|behavior|behaviour)\b)"
+    r"|(\bbrand\s+(?:perception|awareness|sentiment|equity)\b)"
+    r"|(\bcustomer\s+(?:satisfaction|loyalty|sentiment)\b)"
+    r"|(\bpolitical\s+(?:factor|factors|climate|stability|instability)\b)"
+    r"|(\bmarket\s+(?:trend|trends|condition|conditions)(?!\s+(?:share|size|volume|value))\b)"
 )
 
 # Plain-language sub-questions only: reject pasted/generated SQL (Challenger / edits must not bypass this).

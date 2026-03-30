@@ -33,6 +33,7 @@ from app.services.pulsecast_sse_emit import (
     emit_text_chunks,
 )
 from app.clients.serper_search import serper_google_search
+from app.services.data_quality_hints import sub_result_quality_hints
 from app.services.sub_question_tts_guard import is_valid_tts_sub_question
 
 
@@ -494,6 +495,7 @@ def _context_blob_compact(
     }
     if sub_results:
         base["sub_results"] = _compact_sub_results(sub_results)
+        base["sub_result_quality_hints"] = sub_result_quality_hints(sub_results)
     if host_plan:
         base["host_plan"] = {
             "primary_focus": host_plan.primary_focus,

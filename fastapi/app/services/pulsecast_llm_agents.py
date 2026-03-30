@@ -67,37 +67,6 @@ def _serper_results_markdown(
     return "\n".join(lines)
 
 
-async def _emit_web_search_results_sse(
-    on_progress: AgentProgressCallback,
-    *,
-    query: str | None,
-    markdown_body: str,
-) -> None:
-    """Stream Serper snapshot to UI (Web Crawler lane), same pattern as execute_table_chunk."""
-    if not on_progress:
-        return
-    q = (query or "").strip()
-    base: dict[str, Any] = {"query": q}
-    await emit_progress(on_progress, {**base, "type": "web_search_results_started"})
-    header = f"**Web search**\n\n**Query:** {q}\n\n" if q else "**Web search**\n\n"
-    await emit_text_chunks(
-        on_progress=on_progress,
-        base_event=base,
-        text=header,
-        event_type="web_search_results_label_chunk",
-        chunk_size=STREAM_CHUNK_SIZE,
-        delay_s=STREAM_DELAY_S,
-    )
-    await emit_text_chunks(
-        on_progress=on_progress,
-        base_event=base,
-        text=markdown_body,
-        event_type="web_search_results_table_chunk",
-        chunk_size=STREAM_CHUNK_SIZE,
-        delay_s=STREAM_DELAY_S,
-    )
-    await emit_progress(on_progress, {**base, "type": "web_search_results_done"})
-
 PulsecastRole = Literal["HOST", "ANALYST", "MARKETING", "FINANCE", "WEB_CRAWLER", "CHALLENGER"]
 PulsecastAgentId = Literal["host", "analyst", "marketing", "finance", "web_crawler", "challenger"]
 DiscussantRole = Literal["MARKETING", "FINANCE", "WEB_CRAWLER", "CHALLENGER"]
@@ -310,6 +279,13 @@ def _web_search_queries_for_hitl(
     return []
 
 
+def _normalize_web_query_key(s: str) -> str:
+    """Normalize for dedupe: lowercase, collapse whitespace, strip common punctuation edges."""
+    t = (s or "").strip().lower()
+    t = re.sub(r"\s+", " ", t)
+    return t
+
+
 def _existing_web_queries_in_ctx(ctx: dict[str, Any]) -> set[str]:
     existing: set[str] = set()
     by_q = ctx.get("web_search_results_by_query")
@@ -318,7 +294,7 @@ def _existing_web_queries_in_ctx(ctx: dict[str, Any]) -> set[str]:
             if isinstance(item, dict):
                 q = str(item.get("query") or "").strip()
                 if q:
-                    existing.add(q.lower())
+                    existing.add(_normalize_web_query_key(q))
     return existing
 
 
@@ -329,9 +305,10 @@ def _filter_new_web_queries(ctx: dict[str, Any], queries: list[str]) -> list[str
         t = str(q).strip()
         if not t:
             continue
-        if t.lower() in existing:
+        key = _normalize_web_query_key(t)
+        if key in existing:
             continue
-        existing.add(t.lower())
+        existing.add(key)
         out.append(t)
     return out
 
@@ -655,6 +632,118 @@ async def _stream_llm_text(*, settings: Settings, messages: list[dict[str, str]]
         if piece:
             text_parts.append(piece)
     return "".join(text_parts).strip()
+
+
+_WEB_SEARCH_SUMMARIZE_SYSTEM = (
+    "You summarize organic web search results for an analytics assistant UI.\n"
+    "Rules:\n"
+    "- Use ONLY information supported by the provided titles/snippets/links. Do not invent facts.\n"
+    "- If sources conflict or are thin, say so briefly.\n"
+    "- Output markdown: a short heading line then 3–5 bullet points. Each bullet should be one clear takeaway.\n"
+    "- Tie takeaways to the user's question when relevant; if the sources are off-topic, say that.\n"
+    "- Keep total under ~180 words.\n"
+)
+
+
+async def _summarize_serper_organic_results(
+    *,
+    settings: Settings,
+    context_question: str | None,
+    search_query: str,
+    organic: list[dict[str, Any]],
+) -> str:
+    """LLM summary of Serper organic rows for display below the results table."""
+    rows: list[dict[str, str]] = []
+    for r in organic:
+        if not isinstance(r, dict):
+            continue
+        rows.append(
+            {
+                "title": str(r.get("title") or ""),
+                "snippet": str(r.get("snippet") or ""),
+                "link": str(r.get("link") or ""),
+            }
+        )
+    if not rows:
+        return ""
+    payload = {
+        "user_question": (context_question or "").strip() or None,
+        "search_query": (search_query or "").strip(),
+        "organic_results": rows,
+    }
+    user = (
+        "Summarize these search results for the UI.\n\n"
+        f"{json.dumps(payload, ensure_ascii=False)}"
+    )
+    try:
+        text = await _stream_llm_text(
+            settings=settings,
+            messages=[
+                {"role": "system", "content": _WEB_SEARCH_SUMMARIZE_SYSTEM},
+                {"role": "user", "content": user},
+            ],
+        )
+        return (text or "").strip()
+    except Exception:
+        return "_Web takeaways unavailable._"
+
+
+async def _emit_web_search_results_sse(
+    on_progress: AgentProgressCallback,
+    *,
+    settings: Settings | None,
+    query: str | None,
+    markdown_body: str,
+    context_question: str | None = None,
+    organic_for_takeaways: list[dict[str, Any]] | None = None,
+) -> None:
+    """Stream Serper snapshot to UI (Web Crawler lane); optional LLM takeaways below the table."""
+    if not on_progress:
+        return
+    q = (query or "").strip()
+    base: dict[str, Any] = {"query": q}
+    await emit_progress(on_progress, {**base, "type": "web_search_results_started"})
+    header = f"**Web search**\n\n**Query:** {q}\n\n" if q else "**Web search**\n\n"
+    await emit_text_chunks(
+        on_progress=on_progress,
+        base_event=base,
+        text=header,
+        event_type="web_search_results_label_chunk",
+        chunk_size=STREAM_CHUNK_SIZE,
+        delay_s=STREAM_DELAY_S,
+    )
+    await emit_text_chunks(
+        on_progress=on_progress,
+        base_event=base,
+        text=markdown_body,
+        event_type="web_search_results_table_chunk",
+        chunk_size=STREAM_CHUNK_SIZE,
+        delay_s=STREAM_DELAY_S,
+    )
+    take_rows = organic_for_takeaways if isinstance(organic_for_takeaways, list) else None
+    if (
+        settings is not None
+        and getattr(settings, "web_search_summarize_enabled", True)
+        and take_rows
+        and len(take_rows) > 0
+    ):
+        takeaway_md = await _summarize_serper_organic_results(
+            settings=settings,
+            context_question=context_question,
+            search_query=q,
+            organic=take_rows,
+        )
+        if takeaway_md:
+            block = "\n\n### Web takeaways\n\n" + takeaway_md + "\n"
+            await emit_text_chunks(
+                on_progress=on_progress,
+                base_event=base,
+                text=block,
+                event_type="web_search_results_table_chunk",
+                chunk_size=STREAM_CHUNK_SIZE,
+                delay_s=STREAM_DELAY_S,
+            )
+    await emit_progress(on_progress, {**base, "type": "web_search_results_done"})
 
 
 async def _run_role_call(
@@ -1118,6 +1207,7 @@ async def _run_llm_agents_moderated_discussion(
             await _sse_discussion_turn(on_progress, "WEB_CRAWLER", r, wc_out)
             if _serper_configured(settings):
                 queries = _web_search_queries_for_hitl(wc_out, analyst_plan)
+                queries = _filter_new_web_queries(ctx, queries)
                 if (
                     wc_out.needs_web_search
                     and queries
@@ -1374,7 +1464,14 @@ async def run_llm_agents_after_web_hitl(
             "prior panel notes only; do not imply external web results were retrieved."
         )
         _md = _serper_results_markdown(query="", results=None, error=None, declined=True)
-        await _emit_web_search_results_sse(on_progress, query=None, markdown_body=_md)
+        await _emit_web_search_results_sse(
+            on_progress,
+            settings=settings,
+            query=None,
+            markdown_body=_md,
+            context_question=question,
+            organic_for_takeaways=None,
+        )
     else:
         q = (edited_search_query or "").strip() or (proposed_search_query or "").strip()
         step_results: list[dict[str, Any]] | None = None
@@ -1407,7 +1504,17 @@ async def run_llm_agents_after_web_hitl(
                 error=None,
                 declined=False,
             )
-        await _emit_web_search_results_sse(on_progress, query=_q or None, markdown_body=_md)
+        takeaway_rows: list[dict[str, Any]] | None = None
+        if approved and not step_err and _q and step_results:
+            takeaway_rows = list(step_results)
+        await _emit_web_search_results_sse(
+            on_progress,
+            settings=settings,
+            query=_q or None,
+            markdown_body=_md,
+            context_question=question,
+            organic_for_takeaways=takeaway_rows,
+        )
 
         more = bool(queries) and (idx + 1) < len(queries)
         if more:

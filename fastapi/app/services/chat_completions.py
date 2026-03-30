@@ -536,7 +536,14 @@ async def build_resume_web_search_payload(
 
         if not approved:
             md = _serper_results_markdown(query="", results=None, error=None, declined=True)
-            await _emit_web_search_results_sse(on_progress, query=None, markdown_body=md)
+            await _emit_web_search_results_sse(
+                on_progress,
+                settings=settings,
+                query=None,
+                markdown_body=md,
+                context_question=snapshot.question,
+                organic_for_takeaways=None,
+            )
             return await phase_agents_finalize(
                 settings=settings,
                 req=openai_req,
@@ -574,7 +581,17 @@ async def build_resume_web_search_payload(
             md = "_No search query was available after approval._"
         else:
             md = _serper_results_markdown(query=q, results=step_results, error=None, declined=False)
-        await _emit_web_search_results_sse(on_progress, query=q or None, markdown_body=md)
+        takeaway_rows: list[dict[str, Any]] | None = None
+        if approved and not step_err and q and step_results:
+            takeaway_rows = list(step_results)
+        await _emit_web_search_results_sse(
+            on_progress,
+            settings=settings,
+            query=q or None,
+            markdown_body=md,
+            context_question=snapshot.question,
+            organic_for_takeaways=takeaway_rows,
+        )
 
         more = bool(queries) and (idx + 1) < len(queries)
         if more:

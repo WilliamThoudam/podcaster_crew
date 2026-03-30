@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     # Serper (google.serper.dev) — Web Crawler agent; optional
     serper_api_key: str | None = None
     serper_num_results: int = 3
+    web_search_summarize_enabled: bool = True
 
     # Moderated Marketing/Finance/Challenger multi-round discussion (see pulsecast_llm_agents)
     pulsecast_discussion_enabled: bool = True

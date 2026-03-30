@@ -3,6 +3,7 @@ from __future__ import annotations
 import httpx
 
 from app.config import Settings
+from app.errors import UpstreamServiceError
 from app.models.schemas import TextToSqlResponse
 
 
@@ -40,9 +41,29 @@ async def generate_sql(
 
     timeout = httpx.Timeout(settings.http_timeout_seconds)
     async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.post(url, json=payload)
-        resp.raise_for_status()
-        body = resp.json()
+        try:
+            resp = await client.post(url, json=payload)
+            resp.raise_for_status()
+            body = resp.json()
+        except httpx.HTTPStatusError as e:
+            body_text = None
+            try:
+                body_text = e.response.text
+            except Exception:
+                body_text = None
+            raise UpstreamServiceError(
+                service="text_to_sql",
+                message="Upstream rejected the request",
+                upstream_status_code=e.response.status_code,
+                upstream_body=body_text,
+            ) from e
+        except httpx.RequestError as e:
+            raise UpstreamServiceError(
+                service="text_to_sql",
+                message=f"Upstream unavailable: {e}",
+                upstream_status_code=None,
+                upstream_body=None,
+            ) from e
 
     # Support both top-level keys and nested shapes if upstream changes
     if "generated_sql" in body or "error" in body:

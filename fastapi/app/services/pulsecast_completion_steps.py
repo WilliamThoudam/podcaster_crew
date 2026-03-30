@@ -8,6 +8,7 @@ from fastapi import HTTPException, status
 from app.clients.execute_sql import execute_sql as execute_sql_client
 from app.clients.text_to_sql import generate_sql
 from app.config import Settings
+from app.errors import UpstreamServiceError
 from app.models.schemas import (
     ExecuteSqlResponse,
     OpenAIChatCompletionRequest,
@@ -215,6 +216,19 @@ async def run_sub_questions_slice(
                     "planner_mode": "analyst_decomposition",
                 },
             )
+        except UpstreamServiceError as e:
+            is_4xx = e.upstream_status_code is not None and 400 <= e.upstream_status_code < 500
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY if is_4xx else status.HTTP_502_BAD_GATEWAY,
+                detail={
+                    "service": e.service,
+                    "message": e.message,
+                    "sub_question_index": idx + 1,
+                    "sub_question": sub_q,
+                    "upstream_status_code": e.upstream_status_code,
+                    "upstream_body": e.upstream_body,
+                },
+            ) from e
         except httpx.HTTPError as e:
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
@@ -361,6 +375,20 @@ async def run_sub_questions_slice(
                 user_db_id=user_db_id,
                 db_type=db_type,
             )
+        except UpstreamServiceError as e:
+            is_4xx = e.upstream_status_code is not None and 400 <= e.upstream_status_code < 500
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY if is_4xx else status.HTTP_502_BAD_GATEWAY,
+                detail={
+                    "service": e.service,
+                    "message": e.message,
+                    "sub_question_index": idx + 1,
+                    "sub_question": sub_q,
+                    "generated_sql": sql,
+                    "upstream_status_code": e.upstream_status_code,
+                    "upstream_body": e.upstream_body,
+                },
+            ) from e
         except httpx.HTTPError as e:
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,

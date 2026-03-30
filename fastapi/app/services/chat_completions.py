@@ -70,6 +70,38 @@ __all__ = [
     "stream_resume_sse",
 ]
 
+def _extract_upstream_error_text(detail: Any) -> str | None:
+    """
+    Convert structured HTTPException.detail (dict) into a plain, user-facing error line.
+    Used to avoid streaming the internal <<PULSECAST_HTTP_ERROR:{...}>> marker to the UI.
+    """
+    if not isinstance(detail, dict):
+        return None
+
+    # Our UpstreamServiceError mapping emits this shape from pulsecast_completion_steps.py
+    upstream_body = detail.get("upstream_body")
+    if isinstance(upstream_body, str) and upstream_body.strip():
+        try:
+            body_obj = json.loads(upstream_body)
+            if isinstance(body_obj, dict):
+                err = body_obj.get("error")
+                if isinstance(err, str) and err.strip():
+                    return err.strip()
+        except Exception:
+            # Not JSON or not parseable; fall through to return raw text.
+            return upstream_body.strip()
+
+    # Other known shapes
+    tts_err = detail.get("text_to_sql_error")
+    if isinstance(tts_err, str) and tts_err.strip():
+        return tts_err.strip()
+
+    msg = detail.get("message")
+    if isinstance(msg, str) and msg.strip():
+        return msg.strip()
+
+    return None
+
 
 def _chunk_json(
     *,
@@ -653,20 +685,13 @@ async def stream_resume_sse(
     try:
         outcome = await task
     except HTTPException as e:
-        # StreamingResponse may have already sent 200 before the first chunk; never re-raise or Starlette
-        # raises RuntimeError("Caught handled exception, but response already started.").
-        err_payload = json.dumps(
-            {
-                "pulsecast_http_error": True,
-                "status_code": e.status_code,
-                "detail": e.detail,
-            },
-            ensure_ascii=False,
-        )
         if not started:
             started = True
             yield f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), role='assistant')}\n\n"
-        yield f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), content=f'<<PULSECAST_HTTP_ERROR:{err_payload}>>')}\n\n"
+
+        # Prefer a plain, user-facing error line (shown as HOST in the UI)
+        plain = _extract_upstream_error_text(e.detail) or (str(e.detail) if e.detail is not None else str(e))
+        yield f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), content=plain)}\n\n"
         yield f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), finish_reason='stop')}\n\n"
         yield "data: [DONE]\n\n"
         return
@@ -731,18 +756,12 @@ async def stream_completion_sse(
     try:
         outcome = await task
     except HTTPException as e:
-        err_payload = json.dumps(
-            {
-                "pulsecast_http_error": True,
-                "status_code": e.status_code,
-                "detail": e.detail,
-            },
-            ensure_ascii=False,
-        )
         if not started:
             started = True
             yield f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), role='assistant')}\n\n"
-        yield f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), content=f'<<PULSECAST_HTTP_ERROR:{err_payload}>>')}\n\n"
+
+        plain = _extract_upstream_error_text(e.detail) or (str(e.detail) if e.detail is not None else str(e))
+        yield f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), content=plain)}\n\n"
         yield f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), finish_reason='stop')}\n\n"
         yield "data: [DONE]\n\n"
         return

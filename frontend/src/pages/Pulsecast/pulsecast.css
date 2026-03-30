@@ -1071,8 +1071,10 @@ body::before {
 .region-val { font-size: 11px; color: var(--text2); width: 45px; text-align: right; font-family: 'DM Mono', monospace; }
 
 .pulsecast-markdown {
-  color: var(--text);
-  line-height: 1.5;
+  font-family: 'DM Sans', sans-serif;
+  font-size: 13.5px;
+  line-height: 1.65;
+  color: var(--text2);
 }
 
 .pulsecast-markdown p {
@@ -1083,12 +1085,53 @@ body::before {
   margin-bottom: 0;
 }
 
+/* One type family (DM Sans) for transcript markdown: headings are scale/weight only, not Syne display. */
 .pulsecast-markdown h1,
 .pulsecast-markdown h2,
 .pulsecast-markdown h3,
 .pulsecast-markdown h4 {
-  font-family: 'Syne', sans-serif;
-  margin: 0 0 8px 0;
+  font-family: 'DM Sans', sans-serif;
+  color: var(--text);
+  line-height: 1.35;
+  margin: 14px 0 8px 0;
+}
+
+.pulsecast-markdown h1:first-child,
+.pulsecast-markdown h2:first-child,
+.pulsecast-markdown h3:first-child,
+.pulsecast-markdown h4:first-child {
+  margin-top: 0;
+}
+
+.pulsecast-markdown h1 {
+  font-size: 1.35rem;
+  font-weight: 700;
+}
+
+.pulsecast-markdown h2 {
+  font-size: 1.2rem;
+  font-weight: 600;
+}
+
+.pulsecast-markdown h3 {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.pulsecast-markdown h4 {
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+.pulsecast-markdown strong {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.pulsecast-markdown hr {
+  border: none;
+  border-top: 1px solid var(--border2);
+  margin: 14px 0;
 }
 
 .pulsecast-markdown ul,
@@ -1128,7 +1171,8 @@ body::before {
 
 .pulsecast-table {
   border-collapse: collapse;
-  font-size: 12px;
+  font-family: 'DM Sans', sans-serif;
+  font-size: 13px;
   background: var(--surface);
   border-radius: 10px;
   min-width: max-content; /* width grows with columns */
@@ -1141,10 +1185,11 @@ body::before {
 .pulsecast-table th {
   padding: 8px 10px;
   border-bottom: 1px solid var(--border);
-  font-family: 'DM Mono', monospace;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  font-size: 10px;
+  font-family: 'DM Sans', sans-serif;
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: normal;
+  font-size: 11px;
   color: var(--text3);
   text-align: left;
   white-space: nowrap;
@@ -1153,6 +1198,9 @@ body::before {
 .pulsecast-table td {
   padding: 6px 10px;
   border-bottom: 1px solid var(--border);
+  font-family: 'DM Sans', sans-serif;
+  font-size: 13px;
+  font-weight: 400;
   color: var(--text2);
   white-space: nowrap;
 }

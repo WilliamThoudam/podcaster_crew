@@ -635,13 +635,27 @@ async def _stream_llm_text(*, settings: Settings, messages: list[dict[str, str]]
 
 
 _WEB_SEARCH_SUMMARIZE_SYSTEM = (
-    "You summarize organic web search results for an analytics assistant UI.\n"
-    "Rules:\n"
-    "- Use ONLY information supported by the provided titles/snippets/links. Do not invent facts.\n"
-    "- If sources conflict or are thin, say so briefly.\n"
-    "- Output markdown: a short heading line then 3–5 bullet points. Each bullet should be one clear takeaway.\n"
-    "- Tie takeaways to the user's question when relevant; if the sources are off-topic, say that.\n"
-    "- Keep total under ~180 words.\n"
+    "You format organic web search results for an analytics assistant UI.\n\n"
+    "CORE RULE — extract and map, do not invent:\n"
+    "- **Extract** claims only from the provided titles/snippets/links. **Map** them to `user_question` "
+    "(how they relate to what the user is trying to understand).\n"
+    "- Do **not** fabricate statistics, brands, or trends not present in the snippets. If sources are thin or "
+    "off-topic, say that briefly under Impact on Analysis.\n\n"
+    "Output markdown with EXACTLY two sections in this order:\n\n"
+    "### Web Insights (Relevant to [TopicPhrase])\n"
+    "- The heading MUST use this pattern: `### Web Insights (Relevant to X)` where X is a short topic phrase "
+    "(2–8 words, Title Case) derived from `user_question` and/or `search_query` (e.g. Regional Differences, "
+    "Seasonal Demand, New Product Launches). If unclear, use: `### Web Insights (Relevant to your question)`.\n"
+    "- After a blank line, output **3–4** lines starting with `- ` (markdown bullets). Each line: one sentence "
+    "that states what the sources suggest, **as it relates to the user’s analytical angle**, in plain language "
+    "(no citation numbers; no table).\n\n"
+    "### Impact on Analysis\n"
+    "- After a blank line, output **exactly 3** lines starting with `- `. Each is one sentence: how this external "
+    "context **helps interpret** internal sales/warehouse-style results for the user’s question.\n"
+    "- Examples of intent: explains why patterns might appear; suggests what to compare or validate; "
+    "helps distinguish demand-driven vs supply-driven readings — only when grounded in what the sources actually "
+    "support.\n\n"
+    "- Do not add `#` or `##` headings. Do not repeat the results table. Keep total under ~240 words.\n"
 )
 
 
@@ -672,7 +686,9 @@ async def _summarize_serper_organic_results(
         "organic_results": rows,
     }
     user = (
-        "Summarize these search results for the UI.\n\n"
+        "Produce the two-section markdown described in your instructions. "
+        "Extract from organic_results only; map each point to user_question. "
+        "Use `### Web Insights (Relevant to …)` and `### Impact on Analysis` with the bullet counts specified.\n\n"
         f"{json.dumps(payload, ensure_ascii=False)}"
     )
     try:
@@ -685,7 +701,7 @@ async def _summarize_serper_organic_results(
         )
         return (text or "").strip()
     except Exception:
-        return "_Web takeaways unavailable._"
+        return "_Web insights unavailable._"
 
 
 async def _emit_web_search_results_sse(
@@ -734,7 +750,7 @@ async def _emit_web_search_results_sse(
             organic=take_rows,
         )
         if takeaway_md:
-            block = "\n\n### Web takeaways\n\n" + takeaway_md + "\n"
+            block = "\n\n---\n\n" + takeaway_md.strip() + "\n"
             await emit_text_chunks(
                 on_progress=on_progress,
                 base_event=base,

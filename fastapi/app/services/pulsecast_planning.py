@@ -230,8 +230,8 @@ async def run_analyst_planner(
             ),
         )
 
-    max_sql = _clamp_int(settings.pulsecast_max_plan_sql, default=4, min_value=1, max_value=12)
-    max_web = _clamp_int(settings.pulsecast_max_plan_web, default=2, min_value=0, max_value=6)
+    max_sql = _clamp_int(settings.pulsecast_max_plan_sql, default=4, min_value=1, max_value=4)
+    max_web = _clamp_int(settings.pulsecast_max_plan_web, default=2, min_value=0, max_value=2)
 
     return PlanningAnalystOutput(
         sub_questions=sql_pass[:max_sql],

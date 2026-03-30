@@ -40,6 +40,8 @@ from app.services.pulsecast_llm_agents import (
     LlmAgentsPausedWebSearch,
     run_llm_agents_after_web_hitl,
     run_llm_agents_host_only,
+    _emit_web_search_results_sse,
+    _serper_results_markdown,
 )
 from app.services.pulsecast_resume_store import (
     DuplicateSubQuestionPausedSnapshot,
@@ -56,6 +58,7 @@ from app.services.pulsecast_sse_emit import (
     emit_text_chunks,
 )
 from app.services.qa_pipeline import build_answer_summary, validate_and_normalize_sql
+from app.clients.serper_search import serper_google_search
 
 # Re-export for routers / tests that imported from chat_completions
 __all__ = [
@@ -511,6 +514,124 @@ async def build_resume_web_search_payload(
     if not approved:
         await emit_progress(on_progress, {"type": "web_search_declined"})
 
+    # Option A: pre-discussion web-search phase (no agent transcript exists yet).
+    if getattr(snapshot, "stage", "mid") == "pre":
+        openai_req = OpenAIChatCompletionRequest(
+            model="pulsecast-qa",
+            stream=True,
+            messages=[OpenAIChatMessage(role="user", content=snapshot.question)],
+            user=snapshot.openai_user,
+        )
+
+        queries = [str(x).strip() for x in (snapshot.search_queries or []) if str(x).strip()]
+        if not queries and (snapshot.proposed_search_query or "").strip():
+            queries = [(snapshot.proposed_search_query or "").strip()]
+        idx = int(snapshot.pending_search_index or 0)
+        if idx < 0:
+            idx = 0
+        if queries and idx >= len(queries):
+            idx = len(queries) - 1
+
+        completed = [dict(x) for x in (snapshot.completed_web_results or [])]
+
+        if not approved:
+            md = _serper_results_markdown(query="", results=None, error=None, declined=True)
+            await _emit_web_search_results_sse(on_progress, query=None, markdown_body=md)
+            return await phase_agents_finalize(
+                settings=settings,
+                req=openai_req,
+                question=snapshot.question,
+                host_plan=snapshot.host_plan,
+                analyst_plan=snapshot.analyst_plan,
+                primary_sql=snapshot.generated_sql,
+                primary_exe=snapshot.primary_exe,
+                sub_results=list(snapshot.sub_results),
+                completed_web_results=completed,
+                user_declined_web_search=True,
+                on_progress=on_progress,
+            )
+
+        q = (edited_question or "").strip() or (queries[idx] if queries else "").strip()
+        step_results: list[dict[str, Any]] | None = None
+        step_err: str | None = None
+        if q:
+            try:
+                step_results = await serper_google_search(
+                    settings=settings,
+                    query=q,
+                    num=settings.serper_num_results,
+                )
+                completed.append({"query": q, "results": step_results, "error": None})
+            except Exception as e:
+                step_err = str(e)
+                completed.append({"query": q, "results": None, "error": step_err})
+        else:
+            completed.append({"query": "", "results": None, "error": "empty query after approval"})
+
+        if step_err:
+            md = _serper_results_markdown(query=q, results=None, error=str(step_err), declined=False)
+        elif not q:
+            md = "_No search query was available after approval._"
+        else:
+            md = _serper_results_markdown(query=q, results=step_results, error=None, declined=False)
+        await _emit_web_search_results_sse(on_progress, query=q or None, markdown_body=md)
+
+        more = bool(queries) and (idx + 1) < len(queries)
+        if more:
+            snap_ws = WebSearchPausedSnapshot(
+                stage="pre",
+                pipeline=None,
+                discussion=None,
+                question=snapshot.question,
+                generated_sql=snapshot.generated_sql,
+                primary_exe=snapshot.primary_exe,
+                deterministic_summary=snapshot.deterministic_summary,
+                sub_results=list(snapshot.sub_results),
+                host_plan=snapshot.host_plan,
+                analyst_plan=snapshot.analyst_plan,
+                proposed_search_query=queries[idx + 1],
+                search_queries=queries,
+                pending_search_index=idx + 1,
+                completed_web_results=completed,
+                rationale=snapshot.rationale,
+                openai_user=snapshot.openai_user,
+            )
+            token_ws = resume_store.issue_token(snap_ws)
+            n = len(queries)
+            step_no = (idx + 1) + 1
+            await emit_progress(
+                on_progress,
+                {
+                    "type": "web_search_approval_required",
+                    "resume_token": token_ws,
+                    "proposed_search_query": snap_ws.proposed_search_query,
+                    "rationale": snap_ws.rationale,
+                    "pause_kind": "web_search",
+                    "web_search_step_index": step_no,
+                    "web_search_total_steps": max(1, n),
+                },
+            )
+            return CompletionStreamPaused(
+                resume_token=token_ws,
+                proposed_sub_question=snap_ws.proposed_search_query,
+                rationale=snap_ws.rationale,
+            )
+
+        return await phase_agents_finalize(
+            settings=settings,
+            req=openai_req,
+            question=snapshot.question,
+            host_plan=snapshot.host_plan,
+            analyst_plan=snapshot.analyst_plan,
+            primary_sql=snapshot.generated_sql,
+            primary_exe=snapshot.primary_exe,
+            sub_results=list(snapshot.sub_results),
+            completed_web_results=completed,
+            user_declined_web_search=False,
+            on_progress=on_progress,
+        )
+
+    # Existing path: mid-discussion web-search (WEB_CRAWLER requested it).
     agents_out = await run_llm_agents_after_web_hitl(
         settings=settings,
         question=snapshot.question,
@@ -520,8 +641,8 @@ async def build_resume_web_search_payload(
         sub_results=list(snapshot.sub_results),
         host_plan=snapshot.host_plan,
         analyst_plan=snapshot.analyst_plan,
-        discussion=snapshot.discussion,
-        pipeline=snapshot.pipeline,
+        discussion=snapshot.discussion,  # type: ignore[arg-type]
+        pipeline=snapshot.pipeline or [],
         approved=approved,
         edited_search_query=edited_question,
         proposed_search_query=snapshot.proposed_search_query,
@@ -534,6 +655,7 @@ async def build_resume_web_search_payload(
     )
     if isinstance(agents_out, LlmAgentsPausedWebSearch):
         snap_ws = WebSearchPausedSnapshot(
+            stage="mid",
             pipeline=agents_out.pipeline,
             discussion=agents_out.discussion,
             question=agents_out.question,

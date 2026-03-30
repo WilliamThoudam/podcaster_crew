@@ -489,6 +489,8 @@ async def phase_agents_finalize(
     primary_sql: str,
     primary_exe: ExecuteSqlResponse,
     sub_results: list[SubResult],
+    completed_web_results: list[dict[str, Any]] | None = None,
+    user_declined_web_search: bool = False,
     on_progress: ProgressCallback | None,
 ) -> CompletionStreamOutcome:
     deterministic = build_answer_summary(primary_exe)
@@ -501,10 +503,13 @@ async def phase_agents_finalize(
         sub_results=sub_results,
         host_plan=host_plan,
         analyst_plan=analyst_plan,
+        completed_web_results=completed_web_results,
+        user_declined_web_search=user_declined_web_search,
         on_progress=on_progress,
     )
     if isinstance(agents_out, LlmAgentsPausedWebSearch):
         snap = WebSearchPausedSnapshot(
+            stage="mid",
             pipeline=agents_out.pipeline,
             discussion=agents_out.discussion,
             question=agents_out.question,
@@ -583,3 +588,69 @@ async def phase_agents_finalize(
     )
     await emit_progress(on_progress, {"type": "summarizing_done"})
     return CompletionStreamComplete(content=agents_out.answer)
+
+
+async def phase_web_search_hitl(
+    *,
+    settings: Settings,
+    req: OpenAIChatCompletionRequest,
+    question: str,
+    host_plan: PlanningHostOutput,
+    analyst_plan: PlanningAnalystOutput,
+    primary_sql: str,
+    primary_exe: ExecuteSqlResponse,
+    sub_results: list[SubResult],
+    on_progress: ProgressCallback | None,
+) -> CompletionStreamOutcome | tuple[list[dict[str, Any]], bool]:
+    """
+    Option A: pre-discussion web search HITL.
+
+    Returns:
+    - CompletionStreamPaused when user approval is required (resume_token emitted)
+    - (completed_web_results, user_declined_web_search) when no pause is needed
+      (either no web_sub_questions or Serper not configured).
+    """
+    web_qs = [str(x).strip() for x in (analyst_plan.web_sub_questions or []) if str(x).strip()]
+    if not web_qs:
+        return ([], False)
+    # If Serper isn't configured, skip pre-search; WEB_CRAWLER may still decide later.
+    if not (settings.serper_api_key or "").strip():
+        return ([], False)
+
+    deterministic = build_answer_summary(primary_exe)
+    snap = WebSearchPausedSnapshot(
+        stage="pre",
+        pipeline=None,
+        discussion=None,
+        question=question,
+        generated_sql=primary_sql,
+        primary_exe=primary_exe,
+        deterministic_summary=deterministic,
+        sub_results=list(sub_results),
+        host_plan=host_plan,
+        analyst_plan=analyst_plan,
+        proposed_search_query=web_qs[0],
+        search_queries=web_qs,
+        pending_search_index=0,
+        completed_web_results=[],
+        rationale="Planned web evidence steps from analyst_plan.web_sub_questions.",
+        openai_user=req.user,
+    )
+    token = resume_store.issue_token(snap)
+    await emit_progress(
+        on_progress,
+        {
+            "type": "web_search_approval_required",
+            "resume_token": token,
+            "proposed_search_query": web_qs[0],
+            "rationale": snap.rationale,
+            "pause_kind": "web_search",
+            "web_search_step_index": 1,
+            "web_search_total_steps": max(1, len(web_qs)),
+        },
+    )
+    return CompletionStreamPaused(
+        resume_token=token,
+        proposed_sub_question=web_qs[0],
+        rationale=snap.rationale,
+    )

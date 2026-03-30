@@ -34,10 +34,15 @@ class Settings(BaseSettings):
 
     # Serper (google.serper.dev) — Web Crawler agent; optional
     serper_api_key: str | None = None
+    serper_num_results: int = 3
 
     # Moderated Marketing/Finance/Challenger multi-round discussion (see pulsecast_llm_agents)
     pulsecast_discussion_enabled: bool = True
     pulsecast_discussion_max_rounds: int = 3
+
+    # Planner caps (Text-to-SQL + Web crawler steps)
+    pulsecast_max_plan_sql: int = 4
+    pulsecast_max_plan_web: int = 2
 
 
 @lru_cache

@@ -153,10 +153,13 @@ class PulsecastPausedSnapshot:
 
 @dataclass
 class WebSearchPausedSnapshot:
-    """Resume after web_search_approval_required (HITL) — Serper per step, then Challenger + Host."""
+    """Resume after web_search_approval_required (HITL).
 
-    pipeline: list[AgentPipelineStep]
-    discussion: DiscussionState
+    Two stages:
+    - stage="pre": pause happens BEFORE any agent discussion starts (Option A web_search phase).
+    - stage="mid": pause happens DURING agent discussion (existing WEB_CRAWLER behavior).
+    """
+
     question: str
     generated_sql: str
     primary_exe: ExecuteSqlResponse
@@ -171,14 +174,18 @@ class WebSearchPausedSnapshot:
     rationale: str | None
     openai_user: str | None
 
+    stage: Literal["pre", "mid"] = "mid"
+
+    # stage="pre" has no agent discussion yet; keep optional.
+    pipeline: list[AgentPipelineStep] | None = None
+    discussion: DiscussionState | None = None
+
     pause_kind: PauseKindWebSearch = "web_search"
 
     def to_json_dict(self) -> dict[str, Any]:
-        return {
+        d: dict[str, Any] = {
             "pause_kind": "web_search",
-            "pipeline": [p.model_dump(mode="json") for p in self.pipeline],
-            "analyst": self.discussion.analyst.model_dump(mode="json"),
-            "discussion_turns": [t.model_dump(mode="json") for t in self.discussion.turns],
+            "stage": self.stage,
             "question": self.question,
             "generated_sql": self.generated_sql,
             "primary_exe": self.primary_exe.model_dump(mode="json"),
@@ -193,13 +200,29 @@ class WebSearchPausedSnapshot:
             "rationale": self.rationale,
             "openai_user": self.openai_user,
         }
+        if self.pipeline is not None:
+            d["pipeline"] = [p.model_dump(mode="json") for p in self.pipeline]
+        if self.discussion is not None:
+            d["analyst"] = self.discussion.analyst.model_dump(mode="json")
+            d["discussion_turns"] = [t.model_dump(mode="json") for t in self.discussion.turns]
+        return d
 
     @staticmethod
     def from_json_dict(d: dict[str, Any]) -> WebSearchPausedSnapshot:
-        analyst = _AgentOut.model_validate(d["analyst"])
-        turns = [DiscussionTurn.model_validate(x) for x in d["discussion_turns"]]
-        discussion = DiscussionState(analyst=analyst, turns=turns)
-        pipeline = [AgentPipelineStep.model_validate(x) for x in d["pipeline"]]
+        stage = str(d.get("stage") or "mid").strip().lower()
+        if stage not in ("pre", "mid"):
+            stage = "mid"
+
+        discussion: DiscussionState | None = None
+        if "analyst" in d and "discussion_turns" in d:
+            analyst = _AgentOut.model_validate(d["analyst"])
+            turns = [DiscussionTurn.model_validate(x) for x in d["discussion_turns"]]
+            discussion = DiscussionState(analyst=analyst, turns=turns)
+
+        pipeline: list[AgentPipelineStep] | None = None
+        if "pipeline" in d and isinstance(d.get("pipeline"), list):
+            pipeline = [AgentPipelineStep.model_validate(x) for x in d["pipeline"]]
+
         sub_results = [SubResult.model_validate(x) for x in d["sub_results"]]
         proposed = str(d.get("proposed_search_query") or "").strip()
         raw_sqs = d.get("search_queries")
@@ -211,6 +234,7 @@ class WebSearchPausedSnapshot:
         cw = d.get("completed_web_results")
         completed_web_results: list[dict[str, Any]] = cw if isinstance(cw, list) else []
         return WebSearchPausedSnapshot(
+            stage=stage,  # type: ignore[arg-type]
             pipeline=pipeline,
             discussion=discussion,
             question=d["question"],

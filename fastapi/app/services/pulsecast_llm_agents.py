@@ -310,6 +310,31 @@ def _web_search_queries_for_hitl(
     return []
 
 
+def _existing_web_queries_in_ctx(ctx: dict[str, Any]) -> set[str]:
+    existing: set[str] = set()
+    by_q = ctx.get("web_search_results_by_query")
+    if isinstance(by_q, list):
+        for item in by_q:
+            if isinstance(item, dict):
+                q = str(item.get("query") or "").strip()
+                if q:
+                    existing.add(q.lower())
+    return existing
+
+
+def _filter_new_web_queries(ctx: dict[str, Any], queries: list[str]) -> list[str]:
+    existing = _existing_web_queries_in_ctx(ctx)
+    out: list[str] = []
+    for q in queries:
+        t = str(q).strip()
+        if not t:
+            continue
+        if t.lower() in existing:
+            continue
+        existing.add(t.lower())
+        out.append(t)
+    return out
+
 def _merge_completed_web_into_ctx(ctx: dict[str, Any], completed: list[dict[str, Any]]) -> None:
     """Flatten organic rows with source_query + keep per-query grouping for prompts."""
     by_q: list[dict[str, Any]] = []
@@ -899,6 +924,7 @@ async def _run_llm_agents_linear(
             await _sse_discussion_turn(on_progress, role, 1, out)
         if role == "WEB_CRAWLER" and _serper_configured(settings):
             queries = _web_search_queries_for_hitl(out, analyst_plan)
+            queries = _filter_new_web_queries(ctx, queries)
             if out.needs_web_search and queries and host_plan is not None and analyst_plan is not None:
                 ds = discussion_state_from_legacy_prior(prior)
                 if ds is None:
@@ -1162,6 +1188,8 @@ async def run_llm_agents(
     sub_results: list[SubResult] | None = None,
     host_plan: PlanningHostOutput | None = None,
     analyst_plan: PlanningAnalystOutput | None = None,
+    completed_web_results: list[dict[str, Any]] | None = None,
+    user_declined_web_search: bool = False,
     allow_sql_approval_pause: bool = True,
     on_progress: AgentProgressCallback = None,
 ) -> Union[LlmAgentsComplete, LlmAgentsPaused, LlmAgentsPausedWebSearch]:
@@ -1183,6 +1211,15 @@ async def run_llm_agents(
         host_plan=host_plan,
         analyst_plan=analyst_plan,
     )
+    if completed_web_results:
+        _merge_completed_web_into_ctx(ctx, [dict(x) for x in completed_web_results])
+    if user_declined_web_search:
+        ctx["user_declined_web_search"] = True
+        ctx["hitl_note"] = (
+            "The user declined to run a public web search (or this step). "
+            "Answer using warehouse samples and prior panel notes only; "
+            "do not imply external web results were retrieved."
+        )
 
     depth = host_plan.discussion_depth if host_plan else "moderated"
     # Minimal path skips Marketing/Finance/WEB_CRAWLER/Challenger. Planning may still put public-web intents
@@ -1344,7 +1381,11 @@ async def run_llm_agents_after_web_hitl(
         step_err: str | None = None
         if q:
             try:
-                step_results = await serper_google_search(settings=settings, query=q, num=8)
+                step_results = await serper_google_search(
+                    settings=settings,
+                    query=q,
+                    num=settings.serper_num_results,
+                )
                 completed.append({"query": q, "results": step_results, "error": None})
             except Exception as e:
                 step_err = str(e)

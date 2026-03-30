@@ -73,8 +73,16 @@ def _clean_sub_question(text: str) -> str:
     return s
 
 
-_MAX_PLAN_SQL = 4
-_MAX_PLAN_WEB = 2
+def _clamp_int(v: Any, *, default: int, min_value: int, max_value: int) -> int:
+    try:
+        n = int(v)
+    except (TypeError, ValueError):
+        n = default
+    if n < min_value:
+        return min_value
+    if n > max_value:
+        return max_value
+    return n
 
 
 def _dedupe_preserve_order(strings: list[str]) -> list[str]:
@@ -222,9 +230,12 @@ async def run_analyst_planner(
             ),
         )
 
+    max_sql = _clamp_int(settings.pulsecast_max_plan_sql, default=4, min_value=1, max_value=12)
+    max_web = _clamp_int(settings.pulsecast_max_plan_web, default=2, min_value=0, max_value=6)
+
     return PlanningAnalystOutput(
-        sub_questions=sql_pass[:_MAX_PLAN_SQL],
-        web_sub_questions=web_filtered[:_MAX_PLAN_WEB],
+        sub_questions=sql_pass[:max_sql],
+        web_sub_questions=web_filtered[:max_web],
         rationale=out.rationale,
     )
 

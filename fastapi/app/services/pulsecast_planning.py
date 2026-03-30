@@ -73,8 +73,8 @@ def _clean_sub_question(text: str) -> str:
     return s
 
 
-_MAX_PLAN_SQL = 6
-_MAX_PLAN_WEB = 4
+_MAX_PLAN_SQL = 4
+_MAX_PLAN_WEB = 2
 
 
 def _dedupe_preserve_order(strings: list[str]) -> list[str]:

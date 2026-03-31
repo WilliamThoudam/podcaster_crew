@@ -100,6 +100,16 @@ export type StreamQaOutcome =
       web_search_step_index?: number
       web_search_total_steps?: number
     }
+  | {
+      kind: 'discussion_approval_required'
+      resume_token: string
+      stage: 'pre' | 'mid'
+      requested_depth?: 'linear' | 'moderated'
+      round_index: number
+      max_rounds: number
+      focus_for_next_round?: string | null
+      rationale: string | null
+    }
 
 export type PulsecastResumeRequestBody = {
   resume_token: string
@@ -180,6 +190,17 @@ export type StreamProgressEvent =
       web_search_step_index?: number
       web_search_total_steps?: number
     }
+  | {
+      type: 'discussion_approval_required'
+      resume_token: string
+      pause_kind: 'discussion'
+      stage: 'pre' | 'mid'
+      requested_depth?: 'linear' | 'moderated'
+      round_index: number
+      max_rounds: number
+      focus_for_next_round?: string | null
+      rationale?: string | null
+    }
   | { type: 'sql_followup_declined' }
   | { type: 'web_search_declined' }
   | { type: 'duplicate_sub_question_skipped' }
@@ -258,6 +279,16 @@ type ConsumeSseResult =
       web_search_step_index?: number
       web_search_total_steps?: number
     }
+  | {
+      outcome: 'discussion_approval_required'
+      resume_token: string
+      stage: 'pre' | 'mid'
+      requested_depth?: 'linear' | 'moderated'
+      round_index: number
+      max_rounds: number
+      focus_for_next_round?: string | null
+      rationale: string | null
+    }
 
 async function consumeSseChatStream(
   res: Response,
@@ -277,6 +308,17 @@ async function consumeSseChatStream(
         pause_kind: SqlHitlPauseKind
         web_search_step_index?: number
         web_search_total_steps?: number
+      }
+    | undefined
+  let discussionApproval:
+    | {
+        resume_token: string
+        stage: 'pre' | 'mid'
+        requested_depth?: 'linear' | 'moderated'
+        round_index: number
+        max_rounds: number
+        focus_for_next_round?: string | null
+        rationale: string | null
       }
     | undefined
 
@@ -318,6 +360,17 @@ async function consumeSseChatStream(
                 web_search_total_steps: event.web_search_total_steps,
               }
             }
+            if (event.type === 'discussion_approval_required') {
+              discussionApproval = {
+                resume_token: event.resume_token,
+                stage: event.stage,
+                requested_depth: event.requested_depth,
+                round_index: event.round_index,
+                max_rounds: event.max_rounds,
+                focus_for_next_round: event.focus_for_next_round ?? null,
+                rationale: event.rationale ?? null,
+              }
+            }
             callbacks?.onProgress?.(event)
           } catch {
             /* ignore malformed progress marker */
@@ -340,6 +393,18 @@ async function consumeSseChatStream(
         pause_kind: sqlApproval.pause_kind,
         web_search_step_index: sqlApproval.web_search_step_index,
         web_search_total_steps: sqlApproval.web_search_total_steps,
+      }
+    }
+    if (discussionApproval) {
+      return {
+        outcome: 'discussion_approval_required',
+        resume_token: discussionApproval.resume_token,
+        stage: discussionApproval.stage,
+        requested_depth: discussionApproval.requested_depth,
+        round_index: discussionApproval.round_index,
+        max_rounds: discussionApproval.max_rounds,
+        focus_for_next_round: discussionApproval.focus_for_next_round,
+        rationale: discussionApproval.rationale,
       }
     }
     throw new Error('No assistant content received from stream')
@@ -390,6 +455,18 @@ export async function streamPulsecastQa(
       web_search_total_steps: raw.web_search_total_steps,
     }
   }
+  if (raw.outcome === 'discussion_approval_required') {
+    return {
+      kind: 'discussion_approval_required',
+      resume_token: raw.resume_token,
+      stage: raw.stage,
+      requested_depth: raw.requested_depth,
+      round_index: raw.round_index,
+      max_rounds: raw.max_rounds,
+      focus_for_next_round: raw.focus_for_next_round,
+      rationale: raw.rationale,
+    }
+  }
   return { kind: 'complete', answer: raw.assembled }
 }
 
@@ -431,6 +508,18 @@ export async function streamPulsecastResume(
       pause_kind: raw.pause_kind,
       web_search_step_index: raw.web_search_step_index,
       web_search_total_steps: raw.web_search_total_steps,
+    }
+  }
+  if (raw.outcome === 'discussion_approval_required') {
+    return {
+      kind: 'discussion_approval_required',
+      resume_token: raw.resume_token,
+      stage: raw.stage,
+      requested_depth: raw.requested_depth,
+      round_index: raw.round_index,
+      max_rounds: raw.max_rounds,
+      focus_for_next_round: raw.focus_for_next_round,
+      rationale: raw.rationale,
     }
   }
   return { kind: 'complete', answer: raw.assembled }

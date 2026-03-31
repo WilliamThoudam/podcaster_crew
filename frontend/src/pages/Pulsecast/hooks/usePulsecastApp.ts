@@ -181,6 +181,7 @@ function makePulsecastStreamHandlers(
     if (
       event.type === 'sql_approval_required' ||
       event.type === 'web_search_approval_required' ||
+      event.type === 'discussion_approval_required' ||
       event.type === 'sql_followup_declined' ||
       event.type === 'web_search_declined' ||
       event.type === 'duplicate_sub_question_skipped'
@@ -558,6 +559,17 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
   const [sqlHitlWebSearchStep, setSqlHitlWebSearchStep] = useState<number | null>(null)
   const [sqlHitlWebSearchTotal, setSqlHitlWebSearchTotal] = useState<number | null>(null)
 
+  const [discussionHitlOpen, setDiscussionHitlOpen] = useState(false)
+  const [discussionHitlToken, setDiscussionHitlToken] = useState<string | null>(null)
+  const [discussionHitlStage, setDiscussionHitlStage] = useState<'pre' | 'mid'>('pre')
+  const [discussionHitlRequestedDepth, setDiscussionHitlRequestedDepth] = useState<
+    'linear' | 'moderated' | null
+  >(null)
+  const [discussionHitlRoundIndex, setDiscussionHitlRoundIndex] = useState(1)
+  const [discussionHitlMaxRounds, setDiscussionHitlMaxRounds] = useState(1)
+  const [discussionHitlFocusForNextRound, setDiscussionHitlFocusForNextRound] = useState<string | null>(null)
+  const [discussionHitlRationale, setDiscussionHitlRationale] = useState<string | null>(null)
+
   const [toast, setToast] = useState<{ message: string; visible: boolean }>({
     message: '',
     visible: false,
@@ -800,6 +812,38 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
           setSqlHitlOpen(true)
           return
         }
+        if (result.kind === 'discussion_approval_required') {
+          const sid = stream.getSummarizingMsgId()
+          const hint =
+            result.stage === 'pre'
+              ? '_Panel discussion requires approval._ Use the dialog to **approve** (start) or **decline** (switch to minimal answer).'
+              : '_Challenger requested another round._ Use the dialog to **approve** (continue) or **decline** (summarize now).'
+          if (sid) {
+            setQaMessages((m) => m.map((msg) => (msg.id === sid ? { ...msg, text: hint } : msg)))
+          } else {
+            setQaMessages((m) => [
+              ...m,
+              {
+                id: newId(),
+                kind: 'agent',
+                role: 'HOST',
+                emoji: QA_INSIGHT_STYLE.HOST.emoji,
+                color: QA_INSIGHT_STYLE.HOST.color,
+                text: hint,
+                createdAt: Date.now(),
+              },
+            ])
+          }
+          setDiscussionHitlToken(result.resume_token)
+          setDiscussionHitlStage(result.stage)
+          setDiscussionHitlRequestedDepth(result.requested_depth ?? null)
+          setDiscussionHitlRoundIndex(result.round_index)
+          setDiscussionHitlMaxRounds(result.max_rounds)
+          setDiscussionHitlFocusForNextRound(result.focus_for_next_round ?? null)
+          setDiscussionHitlRationale(result.rationale)
+          setDiscussionHitlOpen(true)
+          return
+        }
         setSqlHitlPauseKind('challenger_followup')
         setSqlHitlWebSearchStep(null)
         setSqlHitlWebSearchTotal(null)
@@ -887,6 +931,17 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
           setSqlHitlOpen(true)
           return
         }
+        if (result.kind === 'discussion_approval_required') {
+          setDiscussionHitlToken(result.resume_token)
+          setDiscussionHitlStage(result.stage)
+          setDiscussionHitlRequestedDepth(result.requested_depth ?? null)
+          setDiscussionHitlRoundIndex(result.round_index)
+          setDiscussionHitlMaxRounds(result.max_rounds)
+          setDiscussionHitlFocusForNextRound(result.focus_for_next_round ?? null)
+          setDiscussionHitlRationale(result.rationale)
+          setDiscussionHitlOpen(true)
+          return
+        }
         const finalAnswer = result.answer
         setSqlHitlToken(null)
         setSqlHitlProposed('')
@@ -941,6 +996,108 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
       }
     },
     [setThinkingRole, sqlHitlEdited, sqlHitlToken],
+  )
+
+  const submitDiscussionHitl = useCallback(
+    async (approved: boolean) => {
+      const token = discussionHitlToken
+      if (!token) return
+      setDiscussionHitlOpen(false)
+      setQaStreaming(true)
+      setAgentStates(AGENTS.map(() => 'idle'))
+      const typingId = newId()
+      let stream: ReturnType<typeof makePulsecastStreamHandlers> | null = null
+      try {
+        stream = makePulsecastStreamHandlers(typingId, setQaMessages, setThinkingRole)
+        const result = await streamPulsecastResume(
+          {
+            resume_token: token,
+            approved,
+            session_id: qaSessionRef.current ?? undefined,
+          },
+          {
+            onDelta: stream.onDelta,
+            onProgress: stream.onProgress,
+          },
+        )
+        setAgentStates(AGENTS.map(() => 'idle'))
+        if (result.kind === 'sql_approval_required') {
+          const pk = result.pause_kind ?? 'challenger_followup'
+          setSqlHitlPauseKind(pk)
+          setSqlHitlToken(result.resume_token)
+          setSqlHitlProposed(result.proposed_sub_question)
+          setSqlHitlEdited(result.proposed_sub_question)
+          setSqlHitlRationale(result.rationale)
+          setSqlHitlWebSearchStep(result.web_search_step_index ?? null)
+          setSqlHitlWebSearchTotal(result.web_search_total_steps ?? null)
+          setSqlHitlOpen(true)
+          return
+        }
+        if (result.kind === 'discussion_approval_required') {
+          setDiscussionHitlToken(result.resume_token)
+          setDiscussionHitlStage(result.stage)
+          setDiscussionHitlRequestedDepth(result.requested_depth ?? null)
+          setDiscussionHitlRoundIndex(result.round_index)
+          setDiscussionHitlMaxRounds(result.max_rounds)
+          setDiscussionHitlFocusForNextRound(result.focus_for_next_round ?? null)
+          setDiscussionHitlRationale(result.rationale)
+          setDiscussionHitlOpen(true)
+          return
+        }
+        const finalAnswer = result.answer
+        setDiscussionHitlToken(null)
+        setDiscussionHitlStage('pre')
+        setDiscussionHitlRequestedDepth(null)
+        setDiscussionHitlRoundIndex(1)
+        setDiscussionHitlMaxRounds(1)
+        setDiscussionHitlFocusForNextRound(null)
+        setDiscussionHitlRationale(null)
+        if (!stream.getTypingBubbleCreated()) {
+          setQaMessages((m) => [
+            ...m,
+            {
+              id: newId(),
+              kind: 'agent',
+              role: 'HOST',
+              emoji: QA_INSIGHT_STYLE.HOST.emoji,
+              color: QA_INSIGHT_STYLE.HOST.color,
+              text: finalAnswer,
+              createdAt: Date.now(),
+            },
+          ])
+        }
+        const synth = window.speechSynthesis
+        if (synth) {
+          synth.cancel()
+          const u = new SpeechSynthesisUtterance(finalAnswer)
+          u.rate = 0.95
+          synth.speak(u)
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        if (stream?.getTypingBubbleCreated()) {
+          const streamMsgId = stream.getSummarizingMsgId() ?? typingId
+          setQaMessages((m) => m.filter((msgItem) => msgItem.id !== streamMsgId))
+        }
+        setDiscussionHitlToken(null)
+        setAgentStates(AGENTS.map(() => 'idle'))
+        setQaMessages((m) => [
+          ...m,
+          {
+            id: newId(),
+            kind: 'agent',
+            role: 'SYSTEM',
+            emoji: '⚠️',
+            color: 'var(--red)',
+            text: msg,
+            createdAt: Date.now(),
+          },
+        ])
+      } finally {
+        setQaStreaming(false)
+      }
+    },
+    [discussionHitlToken, setThinkingRole],
   )
 
   const submitInterrupt = useCallback(() => {
@@ -1050,6 +1207,15 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
     sqlHitlWebSearchStep,
     sqlHitlWebSearchTotal,
     submitSqlHitl,
+    discussionHitlOpen,
+    setDiscussionHitlOpen,
+    discussionHitlStage,
+    discussionHitlRequestedDepth,
+    discussionHitlRoundIndex,
+    discussionHitlMaxRounds,
+    discussionHitlFocusForNextRound,
+    discussionHitlRationale,
+    submitDiscussionHitl,
     qaInput,
     setQaInput,
     sendQA,

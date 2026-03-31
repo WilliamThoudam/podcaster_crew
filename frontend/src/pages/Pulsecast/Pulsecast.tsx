@@ -7,6 +7,7 @@ import { formatQaClock } from './utils'
 import { usePulsecastApp } from './hooks/usePulsecastApp'
 import { PulsecastMarkdown } from './components/PulsecastMarkdown'
 import { QaThinkingDots } from './components/QaThinkingDots'
+import { DiscussionApprovalModal } from './components/DiscussionApprovalModal'
 import './pulsecast.css'
 
 const SCREENS: { id: Screen; icon: string; title: string }[] = [
@@ -632,6 +633,19 @@ export function Pulsecast() {
           </div>
         </div>
       </div>
+
+      <DiscussionApprovalModal
+        open={app.discussionHitlOpen}
+        disabled={app.qaStreaming}
+        stage={app.discussionHitlStage}
+        requestedDepth={app.discussionHitlRequestedDepth}
+        roundIndex={app.discussionHitlRoundIndex}
+        maxRounds={app.discussionHitlMaxRounds}
+        focusForNextRound={app.discussionHitlFocusForNextRound}
+        rationale={app.discussionHitlRationale}
+        onApprove={() => app.submitDiscussionHitl(true)}
+        onDecline={() => app.submitDiscussionHitl(false)}
+      />
 
       <div className={`interrupt-overlay${app.interruptOpen ? ' show' : ''}`}>
         <div className="interrupt-modal">

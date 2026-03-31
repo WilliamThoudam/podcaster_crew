@@ -31,9 +31,9 @@ def planning_host_system_prompt() -> str:
         '  - "minimal": simple lookups, distinct lists, enumerations (e.g. "list all countries"), '
         "schema exploration, or one narrow factual slice where Marketing/Finance/Challenger lenses add no value.\n"
         '  - "linear": one pass each of Marketing, Finance, and Challenger after the Analyst — no multi-round '
-        "debate or moderator.\n"
+        "debate.\n"
         '  - "moderated": multi-faceted analytics, drivers, tradeoffs, tensions, or cases where extra rounds '
-        "with a moderator could improve insight.\n"
+        "with Challenger-driven quality gates could improve insight.\n"
     )
 
 

@@ -482,7 +482,7 @@ function makePulsecastStreamHandlers(
     }
     if (event.type === 'discussion_moderator') {
       const verdict = event.continue_discussion ? 'Continue' : 'Stop'
-      pushAnalystUpdate(`_Moderator:_ **${verdict}** — ${event.reason}`)
+      pushAnalystUpdate(`_Challenger:_ **${verdict}** — ${event.reason}`)
       pinHostDraftAtBottom()
       return
     }

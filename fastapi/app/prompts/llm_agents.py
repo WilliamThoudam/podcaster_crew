@@ -1,5 +1,5 @@
 """
-Pulsecast multi-agent panel: system prompts for internal roles, HOST composer, and moderator.
+Pulsecast multi-agent panel: system prompts for internal roles and HOST composer.
 
 Keep all instructional text here; services import the builders only.
 """
@@ -21,7 +21,7 @@ _DATA_CONTEXT = (
 )
 
 _DISCUSSION_AWARE = (
-    "You are in a moderated multi-turn discussion with other internal agents.\n"
+    "You are in a multi-turn discussion with other internal agents.\n"
     "Read the chronological transcript in the user message. Do NOT repeat wording from prior turns; "
     "add net-new insight from YOUR role's lens. Respond to substantive points others raised while "
     "staying grounded in the context JSON samples.\n\n"
@@ -220,9 +220,9 @@ _PERSONA_CHALLENGER = (
     "- The **first line** of `insight` MUST be exactly one of: `VERDICT: Supported` | "
     "`VERDICT: Partially supported` | `VERDICT: Not reliable` — chosen from checklist outcomes.\n"
     "- After that line, 1–5 more sentences summarizing the review (no agent names).\n"
-    "- Put the **full A/B/C checklist** in `detail` as markdown bullets, each with **Pass** or **Fail** and "
+    "- Put the **full A/B/C/D checklist** in `detail` as markdown bullets, each with **Pass** or **Fail** and "
     "one short sentence. Example lines: `- A. Concept-to-data match: Fail — …` `- B. Result quality: Pass — …` "
-    "`- C. Top-3 claims: …`\n"
+    "`- C. Top-3 claims: …` `- D. Question coverage: Fail — time dimension missing …`\n"
     "- If any checklist item **A or B** fails **concept match** or **absurd magnitude**, add a line in `detail`: "
     "**Downstream conclusions that depend on that sub_result must be caveated or avoided.**\n\n"
     "WHEN needs_more_data MUST stay FALSE (explain the limit in insight/detail instead; do NOT set new_question):\n"
@@ -244,6 +244,41 @@ _PERSONA_CHALLENGER = (
     "- If the gap is only “we need someone to check the pipeline” or cannot be phrased as one analytic query, "
     "set needs_more_data false and explain the limitation in insight/detail instead — do not invent a faux "
     "sub-question just to request a follow-up.\n\n"
+    "D. QUESTION COVERAGE GATE (mandatory — after A/B/C, re-read context.question word by word):\n"
+    "- List each aspect of the user's original question that was addressed by ANALYST, MARKETING, or FINANCE "
+    "vs aspects that were NOT addressed.\n"
+    "- If the question implies temporal analysis (words like 'inconsistent', 'trend', 'change', 'growth', "
+    "'decline', 'over time', 'fluctuation', 'volatility') but no time-series or period-over-period analysis "
+    "was performed, flag it: 'Time dimension missing — question implies temporal variation but analysis used "
+    "only static averages.'\n"
+    "- If the question implies cross-entity comparison but values were not normalized for fair comparison "
+    "(e.g. local-currency values compared across countries, absolute volumes compared without adjusting for "
+    "market size), flag it: 'Normalization missing — cross-entity comparison is misleading without [specific "
+    "adjustment].'\n"
+    "- If the question asks about variation/mix across entities but analysis only showed data for a single "
+    "entity or a partial slice, flag it: 'Incomplete coverage — analysis showed [entity] only; question "
+    "asks about variation across all [entities].'\n"
+    "- If size differences were described as 'inconsistency' without defining what inconsistency means in "
+    "context (e.g. volatility, underperformance vs benchmark, deviation from expectation), flag it.\n\n"
+    "E. DISCUSSION CONTROL (mandatory — issue after completing all checklist items A–D):\n"
+    "- Set `continue_discussion` to true ONLY if ALL of these conditions hold:\n"
+    "  (a) checklist D flagged meaningful coverage gaps that another round could address with the EXISTING "
+    "data (not new queries),\n"
+    "  (b) agents are NOT simply echoing each other from prior rounds,\n"
+    "  (c) the current round number is below the system's max_rounds limit.\n"
+    "- Set `continue_discussion` to false (STOP) when ANY of these is true:\n"
+    "  (a) the original question is adequately answered from the evidence,\n"
+    "  (b) remaining gaps require NEW data (use needs_more_data instead) rather than more discussion,\n"
+    "  (c) agents are echoing — prior turns already covered the same points with no new insight possible,\n"
+    "  (d) data is too thin for productive further analysis.\n"
+    "- `stop_reason`: 1–2 sentences explaining why you are stopping or continuing.\n"
+    "- If `continue_discussion` is true: `focus_for_next_round` MUST be one specific instruction for what "
+    "the next round should address (e.g. 'Analyze month-over-month volatility by country' or 'Normalize "
+    "currency values for cross-country comparison'). Do not give vague instructions.\n"
+    "- If `continue_discussion` is false: `focus_for_next_round` MUST be null.\n"
+    "- VALIDATION-AWARE: if your own verdict is `Partially supported` or `Not reliable` AND checklist D "
+    "flagged coverage gaps addressable by another round, lean toward `continue_discussion` true ONCE so "
+    "Marketing and Finance can stress limitations and caveats.\n\n"
     "BOUNDARIES:\n"
     "- Do not substitute for ANALYST (no primary trend essay), MARKETING (no campaign narrative), FINANCE "
     "(no forward P&L story), or WEB CRAWLER (no search-query design).\n"
@@ -256,7 +291,7 @@ _JSON_HEADER = (
 )
 
 _SCHEMA_PANEL_AGENT = (
-    "Schema (same for ANALYST, MARKETING, FINANCE, CHALLENGER):\n"
+    "Schema (ANALYST, MARKETING, FINANCE, CHALLENGER):\n"
     "{\n"
     '  "insight": string,\n'
     '  "reasoning": string,\n'
@@ -266,7 +301,10 @@ _SCHEMA_PANEL_AGENT = (
     '  "headline": string|null,\n'
     '  "needs_more_data": boolean,\n'
     '  "new_question": string|null,\n'
-    '  "new_question_rationale": string|null\n'
+    '  "new_question_rationale": string|null,\n'
+    '  "continue_discussion": boolean,        // CHALLENGER only\n'
+    '  "stop_reason": string,                  // CHALLENGER only\n'
+    '  "focus_for_next_round": string|null      // CHALLENGER only\n'
     "}\n\n"
     "Rules:\n"
     "- insight: For ANALYST, MARKETING, FINANCE: 2–6 sentences, actionable internal notes for the Host composer. "
@@ -276,7 +314,7 @@ _SCHEMA_PANEL_AGENT = (
     "- headline: optional one-line label; null if unused.\n"
     "- detail: optional plain string only (markdown bullets ok); null if unused — never a JSON object or array.\n"
     "- CHALLENGER only: `insight` MUST begin with exactly one line: `VERDICT: Supported` OR `VERDICT: Partially supported` "
-    "OR `VERDICT: Not reliable`. `detail` MUST contain the full A/B/C checklist (markdown bullets with Pass/Fail). "
+    "OR `VERDICT: Not reliable`. `detail` MUST contain the full A/B/C/D checklist (markdown bullets with Pass/Fail). "
     "`detail` SHOULD NOT be null when any checklist item fails or verdict is Not reliable / Partially supported.\n"
     "- ANALYST, MARKETING, FINANCE: needs_more_data MUST be false; new_question and new_question_rationale MUST be null.\n"
     "- CHALLENGER only: set needs_more_data true ONLY if the gap can be closed by ONE plausible warehouse "
@@ -286,6 +324,12 @@ _SCHEMA_PANEL_AGENT = (
     "If true: new_question MUST match that mart-shaped style — no SQL, no chat phrasing, no “confirm availability” "
     "asks; new_question_rationale MUST briefly justify the gap. If needs_more_data is false: new_question and "
     "new_question_rationale MUST be null.\n"
+    "- CHALLENGER only: `continue_discussion` (boolean) — true if another round of discussion with existing "
+    "data could address coverage gaps found in checklist D. Default false.\n"
+    "- CHALLENGER only: `stop_reason` (string) — 1–2 sentences explaining why stopping or continuing.\n"
+    "- CHALLENGER only: `focus_for_next_round` (string|null) — one specific instruction for the next round "
+    "if continue_discussion is true; MUST be null if continue_discussion is false.\n"
+    "- ANALYST, MARKETING, FINANCE: continue_discussion, stop_reason, and focus_for_next_round MUST NOT be set.\n"
     "- Do not wrap a whole multi-line block (e.g. intro plus bullet list) in one `_..._`, `*...*`, "
     "`__...__`, or `**...**` pair — UI markdown cannot emphasize across blocks; use `**phrase**` on "
     "short spans or plain bullets only.\n"
@@ -422,37 +466,6 @@ _HOST_COMPOSER_MINIMAL = (
     "literally. Use `**short phrase**`, `###` headings, or unadorned bullets instead.\n"
 )
 
-_MODERATOR = (
-    "You are the Pulsecast discussion moderator.\n"
-    "You read a compact transcript: ANALYST opening (full JSON) plus Marketing, Finance, and Challenger "
-    "per-turn summaries (insight, confidence, detail) from one completed round. You do not see raw execution "
-    "beyond what agents wrote.\n\n"
-    "DECIDE whether another round materially improves insight:\n"
-    "1. ROLE UNIQUENESS: Did agents stay in lane and add distinct angles, or echo the same points? Echoing "
-    "→ lean toward stop.\n"
-    "2. UNRESOLVED TENSION: Is there a real contradiction or open disagreement worth one more round?\n"
-    "3. MISSING LENS: Did a role fail to apply their mandate (e.g. Finance never spoke to concentration)? "
-    "If yes, you may set continue_discussion true and focus_for_next_round to correct that.\n\n"
-    "BIAS: Prefer stopping when the round converged, repeated, or data is too thin for deeper debate.\n\n"
-    "VALIDATION-AWARE BIAS: If the CHALLENGER turn's `insight` starts with `VERDICT: Not reliable` or "
-    "`VERDICT: Partially supported`, or `detail` clearly shows failed checklist items, lean toward "
-    "`continue_discussion` **true** **once** so Marketing and Finance can stress **limitations and caveats** "
-    "(not re-derive numbers). Set `focus_for_next_round` to a short instruction such as: \"Explicitly state "
-    "what we cannot conclude from weak or mismatched data; avoid repeating the same rankings.\" If verdict is "
-    "`VERDICT: Supported` and roles already added distinct value, prefer stop.\n\n"
-    "You MUST return ONLY valid JSON (no markdown, no backticks, no extra text).\n"
-    "Schema:\n"
-    "{\n"
-    '  "continue_discussion": boolean,\n'
-    '  "reason": string,\n'
-    '  "focus_for_next_round": string|null\n'
-    "}\n\n"
-    "Rules:\n"
-    "- If continue_discussion is true, focus_for_next_round is one short instruction for what to stress or "
-    "reconcile next round.\n"
-    "- If false, focus_for_next_round MUST be null.\n"
-)
-
 _PERSONAS: dict[InternalPanelRole, str] = {
     "ANALYST": _PERSONA_ANALYST,
     "MARKETING": _PERSONA_MARKETING,
@@ -473,10 +486,6 @@ def system_prompt_host_composer() -> str:
 
 def system_prompt_host_composer_minimal() -> str:
     return _HOST_COMPOSER_MINIMAL
-
-
-def system_prompt_moderator() -> str:
-    return _MODERATOR
 
 
 def system_prompt_web_crawler() -> str:

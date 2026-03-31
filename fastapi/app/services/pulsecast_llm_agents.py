@@ -15,7 +15,6 @@ from app.prompts.llm_agents import (
     system_prompt_host_composer,
     system_prompt_host_composer_minimal,
     system_prompt_internal,
-    system_prompt_moderator,
     system_prompt_web_crawler,
 )
 from app.models.schemas import (
@@ -103,6 +102,9 @@ class _AgentOut(BaseModel):
     search_query: str | None = None
     search_queries: list[str] | None = None
     web_search_rationale: str | None = None
+    continue_discussion: bool = False
+    stop_reason: str | None = None
+    focus_for_next_round: str | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -124,14 +126,6 @@ class DiscussionTurn(BaseModel):
 class DiscussionState:
     analyst: _AgentOut
     turns: list[DiscussionTurn]
-
-
-class _ModeratorOut(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-    continue_discussion: bool
-    reason: str = ""
-    focus_for_next_round: str | None = None
 
 
 _JSON_BLOCK = re.compile(r"\{[\s\S]*\}", re.MULTILINE)
@@ -370,15 +364,6 @@ def _parse_host_json(raw: str) -> _HostOut:
     return _HostOut.model_validate(obj)
 
 
-def _parse_moderator_json(raw: str) -> _ModeratorOut:
-    s = raw.strip()
-    m = _JSON_BLOCK.search(s)
-    if not m:
-        raise ValueError("Moderator output did not contain a JSON object")
-    obj = json.loads(m.group(0))
-    return _ModeratorOut.model_validate(obj)
-
-
 def _discussion_markdown(out: _AgentOut) -> str:
     lead = f"**{out.headline}**\n\n" if (out.headline and out.headline.strip()) else ""
     parts = [f"{lead}**{out.phase}**\n\n{out.insight}"]
@@ -426,9 +411,9 @@ async def _sse_discussion_turn(
     await emit_progress(on_progress, {**base, "type": "discussion_turn_done"})
 
 
-async def _sse_discussion_moderator(
+async def _sse_challenger_control(
     on_progress: AgentProgressCallback,
-    mod: _ModeratorOut,
+    out: _AgentOut,
 ) -> None:
     if not on_progress:
         return
@@ -436,8 +421,8 @@ async def _sse_discussion_moderator(
         on_progress,
         {
             "type": "discussion_moderator",
-            "continue_discussion": mod.continue_discussion,
-            "reason": mod.reason,
+            "continue_discussion": out.continue_discussion,
+            "reason": out.stop_reason or "",
         },
     )
 
@@ -556,29 +541,8 @@ def _discussion_user_prompt(
         lines.append("(none yet — you speak first after the Analyst.)\n")
     lines.append(f"\nYour turn: {role} in round {round_index}.\n")
     if focus_for_next_round and focus_for_next_round.strip():
-        lines.append(f"Moderator focus for this round: {focus_for_next_round.strip()}\n")
+        lines.append(f"Challenger focus for this round: {focus_for_next_round.strip()}\n")
     return "".join(lines)
-
-
-def _moderator_user_prompt(*, ctx: dict[str, Any], analyst: _AgentOut, turns: list[DiscussionTurn]) -> str:
-    compact_round: list[dict[str, Any]] = [
-        {
-            "round": t.round_index,
-            "role": t.role,
-            "insight": t.output.insight,
-            "confidence": t.output.confidence,
-            "detail": t.output.detail,
-        }
-        for t in turns
-    ]
-    return (
-        "User question (from context.question):\n"
-        f"{json.dumps(ctx.get('question', ''), ensure_ascii=False)}\n\n"
-        "ANALYST opening summary:\n"
-        f"{json.dumps(analyst.model_dump(), ensure_ascii=False)}\n\n"
-        "Latest full round transcript (all turns this round, in order):\n"
-        f"{json.dumps(compact_round, ensure_ascii=False)}\n"
-    )
 
 
 def _host_user_prompt(*, ctx: dict[str, Any], discussion: DiscussionState) -> str:
@@ -846,30 +810,6 @@ async def _run_host_json(
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"LLM agent {role_label} failed: {e}",
-        ) from e
-
-
-async def _run_moderator_call(*, settings: Settings, user_content: str) -> _ModeratorOut:
-    try:
-        text = await _stream_llm_text(
-            settings=settings,
-            messages=[
-                {"role": "system", "content": system_prompt_moderator()},
-                {"role": "user", "content": user_content},
-            ],
-        )
-        if not text:
-            raise ValueError("Empty streamed content from moderator")
-        return _parse_moderator_json(text)
-    except (ValueError, json.JSONDecodeError) as e:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"LLM moderator failed: {e}",
-        ) from e
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"LLM moderator failed: {e}",
         ) from e
 
 
@@ -1260,13 +1200,11 @@ async def _run_llm_agents_moderated_discussion(
         if r >= max_rounds:
             break
 
-        round_turns = turns[round_slice_start:]
-        mod_user = _moderator_user_prompt(ctx=ctx, analyst=analyst_out, turns=round_turns)
-        mod = await _run_moderator_call(settings=settings, user_content=mod_user)
-        await _sse_discussion_moderator(on_progress, mod)
-        if not mod.continue_discussion:
+        challenger_turn = turns[-1]
+        await _sse_challenger_control(on_progress, challenger_turn.output)
+        if not challenger_turn.output.continue_discussion:
             break
-        focus = (mod.focus_for_next_round or "").strip() or None
+        focus = (challenger_turn.output.focus_for_next_round or "").strip() or None
 
     discussion = DiscussionState(analyst=analyst_out, turns=turns)
     host_out = await _run_host_json(

@@ -876,6 +876,28 @@ class LlmAgentsPausedWebSearch:
     rationale: str | None
 
 
+@dataclass
+class LlmAgentsPausedDiscussion:
+    stage: Literal["pre", "mid"]
+    question: str
+    generated_sql: str
+    primary_exe: ExecuteSqlResponse
+    deterministic_summary: str
+    sub_results: list[SubResult]
+    host_plan: PlanningHostOutput
+    analyst_plan: PlanningAnalystOutput
+    openai_user: str | None = None
+
+    requested_depth: Literal["linear", "moderated"] = "moderated"
+    max_rounds: int = 3
+    next_round_index: int = 1
+    focus_for_next_round: str | None = None
+    rationale: str | None = None
+
+    pipeline: list[AgentPipelineStep] | None = None
+    discussion: DiscussionState | None = None
+
+
 def discussion_state_from_legacy_prior(prior: dict[str, _AgentOut]) -> DiscussionState | None:
     """Best-effort conversion for snapshot v1 (single pass)."""
     if "ANALYST" not in prior:
@@ -1084,25 +1106,33 @@ async def _run_llm_agents_moderated_discussion(
     allow_sql_approval_pause: bool,
     max_rounds: int,
     on_progress: AgentProgressCallback,
+    initial_discussion: DiscussionState | None = None,
+    initial_pipeline: list[AgentPipelineStep] | None = None,
+    start_round: int = 1,
+    focus_for_next_round: str | None = None,
 ) -> Union[LlmAgentsComplete, LlmAgentsPaused, LlmAgentsPausedWebSearch]:
-    pipeline: list[AgentPipelineStep] = []
-    analyst_out = await _run_panel_agent_json(
-        settings,
-        "ANALYST",
-        system_prompt_internal("ANALYST", discussion_aware=False),
-        _analyst_opening_prompt(ctx=ctx),
-    )
-    pipeline.append(
-        AgentPipelineStep(
-            id=_agent_id("ANALYST"),
-            status="completed",
-            phase=analyst_out.phase,
-            detail=analyst_out.detail,
+    pipeline: list[AgentPipelineStep] = list(initial_pipeline) if initial_pipeline is not None else []
+    turns: list[DiscussionTurn] = list(initial_discussion.turns) if initial_discussion is not None else []
+    focus: str | None = focus_for_next_round
+
+    if initial_discussion is not None:
+        analyst_out = initial_discussion.analyst
+    else:
+        analyst_out = await _run_panel_agent_json(
+            settings,
+            "ANALYST",
+            system_prompt_internal("ANALYST", discussion_aware=False),
+            _analyst_opening_prompt(ctx=ctx),
         )
-    )
-    await _sse_discussion_analyst(on_progress, analyst_out)
-    turns: list[DiscussionTurn] = []
-    focus: str | None = None
+        pipeline.append(
+            AgentPipelineStep(
+                id=_agent_id("ANALYST"),
+                status="completed",
+                phase=analyst_out.phase,
+                detail=analyst_out.detail,
+            )
+        )
+        await _sse_discussion_analyst(on_progress, analyst_out)
 
     async def _run_one_discussant(
         *,
@@ -1160,7 +1190,9 @@ async def _run_llm_agents_moderated_discussion(
                 )
         return None
 
-    for r in range(1, max_rounds + 1):
+    if start_round < 1:
+        start_round = 1
+    for r in range(start_round, max_rounds + 1):
         if on_progress:
             await emit_progress(on_progress, {"type": "discussion_round_started", "round": r})
         round_slice_start = len(turns)
@@ -1228,6 +1260,29 @@ async def _run_llm_agents_moderated_discussion(
         if not challenger_turn.output.continue_discussion:
             break
         focus = (challenger_turn.output.focus_for_next_round or "").strip() or None
+        # HITL pause before continuing to next round.
+        if host_plan is None or analyst_plan is None:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Discussion pause requires host_plan and analyst_plan",
+            )
+        return LlmAgentsPausedDiscussion(
+            stage="mid",
+            requested_depth="moderated",
+            pipeline=list(pipeline),
+            discussion=DiscussionState(analyst=analyst_out, turns=list(turns)),
+            question=question,
+            generated_sql=generated_sql,
+            primary_exe=exe,
+            deterministic_summary=deterministic_summary,
+            sub_results=sr_list,
+            host_plan=host_plan,
+            analyst_plan=analyst_plan,
+            max_rounds=max_rounds,
+            next_round_index=r + 1,
+            focus_for_next_round=focus,
+            rationale=challenger_turn.output.stop_reason,
+        )
 
     discussion = DiscussionState(analyst=analyst_out, turns=turns)
     host_out = await _run_host_json(
@@ -1261,7 +1316,7 @@ async def run_llm_agents(
     user_declined_web_search: bool = False,
     allow_sql_approval_pause: bool = True,
     on_progress: AgentProgressCallback = None,
-) -> Union[LlmAgentsComplete, LlmAgentsPaused, LlmAgentsPausedWebSearch]:
+) -> Union[LlmAgentsComplete, LlmAgentsPaused, LlmAgentsPausedWebSearch, LlmAgentsPausedDiscussion]:
     """
     Run internal enrichment, then HOST.
     Routing uses host_plan.discussion_depth: minimal (ANALYST→HOST), linear (single M→F→WC→C pass), or moderated
@@ -1308,21 +1363,39 @@ async def run_llm_agents(
         )
 
     max_rounds = max(1, settings.pulsecast_discussion_max_rounds)
-    if depth == "moderated":
-        return await _run_llm_agents_moderated_discussion(
-            settings=settings,
-            question=question,
-            generated_sql=generated_sql,
-            exe=exe,
-            deterministic_summary=deterministic_summary,
-            sr_list=sr_list,
-            host_plan=host_plan,
-            analyst_plan=analyst_plan,
-            ctx=ctx,
-            allow_sql_approval_pause=allow_sql_approval_pause,
-            max_rounds=max_rounds,
-            on_progress=on_progress,
-        )
+    if depth in ("linear", "moderated"):
+        # HITL pause before discussion begins (linear or moderated).
+        if host_plan is not None and analyst_plan is not None:
+            return LlmAgentsPausedDiscussion(
+                stage="pre",
+                requested_depth=depth,  # type: ignore[arg-type]
+                question=question,
+                generated_sql=generated_sql,
+                primary_exe=exe,
+                deterministic_summary=deterministic_summary,
+                sub_results=sr_list,
+                host_plan=host_plan,
+                analyst_plan=analyst_plan,
+                max_rounds=max_rounds,
+                next_round_index=1,
+                focus_for_next_round=None,
+                rationale="Start 1-round panel." if depth == "linear" else "Start multi-round panel.",
+            )
+        if depth == "moderated":
+            return await _run_llm_agents_moderated_discussion(
+                settings=settings,
+                question=question,
+                generated_sql=generated_sql,
+                exe=exe,
+                deterministic_summary=deterministic_summary,
+                sr_list=sr_list,
+                host_plan=host_plan,
+                analyst_plan=analyst_plan,
+                ctx=ctx,
+                allow_sql_approval_pause=allow_sql_approval_pause,
+                max_rounds=max_rounds,
+                on_progress=on_progress,
+            )
     return await _run_llm_agents_linear(
         settings=settings,
         question=question,
@@ -1336,6 +1409,42 @@ async def run_llm_agents(
         allow_sql_approval_pause=allow_sql_approval_pause,
         on_progress=on_progress,
     )
+
+
+async def run_llm_agents_minimal_only(
+    *,
+    settings: Settings,
+    question: str,
+    generated_sql: str,
+    exe: ExecuteSqlResponse,
+    deterministic_summary: str,
+    sub_results: list[SubResult],
+    host_plan: PlanningHostOutput,
+    analyst_plan: PlanningAnalystOutput,
+    completed_web_results: list[dict[str, Any]] | None = None,
+    user_declined_web_search: bool = False,
+    on_progress: AgentProgressCallback = None,
+) -> LlmAgentsComplete:
+    """Force minimal path (ANALYST→HOST), ignoring host_plan.discussion_depth."""
+    ctx = _context_blob_compact(
+        question=question,
+        generated_sql=generated_sql,
+        exe=exe,
+        deterministic_summary=deterministic_summary,
+        sub_results=list(sub_results),
+        host_plan=host_plan,
+        analyst_plan=analyst_plan,
+    )
+    if completed_web_results:
+        _merge_completed_web_into_ctx(ctx, [dict(x) for x in completed_web_results])
+    if user_declined_web_search:
+        ctx["user_declined_web_search"] = True
+        ctx["hitl_note"] = (
+            "The user declined to run a public web search (or this step). "
+            "Answer using warehouse samples and prior panel notes only; "
+            "do not imply external web results were retrieved."
+        )
+    return await _run_llm_agents_minimal(settings=settings, ctx=ctx, on_progress=on_progress)
 
 
 async def run_llm_agents_host_only(

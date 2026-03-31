@@ -21,12 +21,14 @@ from app.services.pulsecast_llm_agents import (
 PauseKindChallenger = Literal["challenger_followup"]
 PauseKindDuplicate = Literal["duplicate_sub_question"]
 PauseKindWebSearch = Literal["web_search"]
+PauseKindDiscussion = Literal["discussion"]
 
 # Union of snapshots stored under a resume_token (Challenger HITL vs duplicate-SQL vs web search HITL).
 PulsecastPausedSnapshotUnion = Union[
     "PulsecastPausedSnapshot",
     "DuplicateSubQuestionPausedSnapshot",
     "WebSearchPausedSnapshot",
+    "DiscussionPausedSnapshot",
 ]
 
 
@@ -253,12 +255,112 @@ class WebSearchPausedSnapshot:
         )
 
 
+@dataclass
+class DiscussionPausedSnapshot:
+    """Resume after discussion_approval_required (HITL).
+
+    Two stages:
+    - stage="pre": pause happens BEFORE moderated discussion starts.
+    - stage="mid": pause happens BETWEEN rounds in moderated discussion.
+    """
+
+    # Common context
+    question: str
+    generated_sql: str
+    primary_exe: ExecuteSqlResponse
+    deterministic_summary: str
+    sub_results: list[SubResult]
+    host_plan: PlanningHostOutput
+    analyst_plan: PlanningAnalystOutput
+    openai_user: str | None
+
+    # Discussion control
+    stage: Literal["pre", "mid"] = "pre"
+    requested_depth: Literal["linear", "moderated"] = "moderated"
+    max_rounds: int = 3
+    next_round_index: int = 1
+    focus_for_next_round: str | None = None
+    rationale: str | None = None
+
+    # stage="mid" needs transcript + pipeline; stage="pre" keeps optional.
+    pipeline: list[AgentPipelineStep] | None = None
+    discussion: DiscussionState | None = None
+
+    pause_kind: PauseKindDiscussion = "discussion"
+
+    def to_json_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {
+            "pause_kind": "discussion",
+            "stage": self.stage,
+            "requested_depth": self.requested_depth,
+            "question": self.question,
+            "generated_sql": self.generated_sql,
+            "primary_exe": self.primary_exe.model_dump(mode="json"),
+            "deterministic_summary": self.deterministic_summary,
+            "sub_results": [sr.model_dump(mode="json") for sr in self.sub_results],
+            "host_plan": self.host_plan.model_dump(mode="json"),
+            "analyst_plan": self.analyst_plan.model_dump(mode="json"),
+            "openai_user": self.openai_user,
+            "max_rounds": int(self.max_rounds),
+            "next_round_index": int(self.next_round_index),
+            "focus_for_next_round": self.focus_for_next_round,
+            "rationale": self.rationale,
+        }
+        if self.pipeline is not None:
+            d["pipeline"] = [p.model_dump(mode="json") for p in self.pipeline]
+        if self.discussion is not None:
+            d["analyst"] = self.discussion.analyst.model_dump(mode="json")
+            d["discussion_turns"] = [t.model_dump(mode="json") for t in self.discussion.turns]
+        return d
+
+    @staticmethod
+    def from_json_dict(d: dict[str, Any]) -> DiscussionPausedSnapshot:
+        stage = str(d.get("stage") or "pre").strip().lower()
+        if stage not in ("pre", "mid"):
+            stage = "pre"
+        rd = str(d.get("requested_depth") or "moderated").strip().lower()
+        if rd not in ("linear", "moderated"):
+            rd = "moderated"
+
+        discussion: DiscussionState | None = None
+        if "analyst" in d and "discussion_turns" in d:
+            analyst = _AgentOut.model_validate(d["analyst"])
+            turns = [DiscussionTurn.model_validate(x) for x in d["discussion_turns"]]
+            discussion = DiscussionState(analyst=analyst, turns=turns)
+
+        pipeline: list[AgentPipelineStep] | None = None
+        if "pipeline" in d and isinstance(d.get("pipeline"), list):
+            pipeline = [AgentPipelineStep.model_validate(x) for x in d["pipeline"]]
+
+        sub_results = [SubResult.model_validate(x) for x in d["sub_results"]]
+        return DiscussionPausedSnapshot(
+            stage=stage,  # type: ignore[arg-type]
+            requested_depth=rd,  # type: ignore[arg-type]
+            pipeline=pipeline,
+            discussion=discussion,
+            question=d["question"],
+            generated_sql=d["generated_sql"],
+            primary_exe=ExecuteSqlResponse.model_validate(d["primary_exe"]),
+            deterministic_summary=d["deterministic_summary"],
+            sub_results=sub_results,
+            host_plan=PlanningHostOutput.model_validate(d["host_plan"]),
+            analyst_plan=PlanningAnalystOutput.model_validate(d["analyst_plan"]),
+            openai_user=d.get("openai_user"),
+            max_rounds=int(d.get("max_rounds") or 3),
+            next_round_index=int(d.get("next_round_index") or 1),
+            focus_for_next_round=d.get("focus_for_next_round"),
+            rationale=d.get("rationale"),
+        )
+
+
 def deserialize_paused_snapshot(d: dict[str, Any]) -> PulsecastPausedSnapshotUnion:
     kind = d.get("pause_kind")
     if kind == "duplicate_sub_question":
         return DuplicateSubQuestionPausedSnapshot.from_json_dict(d)
     if kind == "web_search":
         return WebSearchPausedSnapshot.from_json_dict(d)
+    if kind == "discussion":
+        return DiscussionPausedSnapshot.from_json_dict(d)
     return PulsecastPausedSnapshot.from_json_dict(d)
 
 

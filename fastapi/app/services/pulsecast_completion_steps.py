@@ -26,6 +26,7 @@ from app.services.pulsecast_completion_types import (
 from app.services.pulsecast_llm_agents import (
     LlmAgentsPaused,
     LlmAgentsPausedWebSearch,
+    LlmAgentsPausedDiscussion,
     run_llm_agents,
 )
 from app.services.pulsecast_planning import (
@@ -37,6 +38,7 @@ from app.services.pulsecast_resume_store import (
     DuplicateSubQuestionPausedSnapshot,
     PulsecastPausedSnapshot,
     WebSearchPausedSnapshot,
+    DiscussionPausedSnapshot,
     resume_store,
 )
 from app.services.pulsecast_sse_emit import (
@@ -575,6 +577,49 @@ async def phase_agents_finalize(
         return CompletionStreamPaused(
             resume_token=token,
             proposed_sub_question=agents_out.proposed_sub_question,
+            rationale=agents_out.rationale,
+        )
+    if isinstance(agents_out, LlmAgentsPausedDiscussion):
+        snap = DiscussionPausedSnapshot(
+            stage=agents_out.stage,
+            requested_depth=agents_out.requested_depth,
+            pipeline=agents_out.pipeline,
+            discussion=agents_out.discussion,
+            question=agents_out.question,
+            generated_sql=agents_out.generated_sql,
+            primary_exe=agents_out.primary_exe,
+            deterministic_summary=agents_out.deterministic_summary,
+            sub_results=agents_out.sub_results,
+            host_plan=agents_out.host_plan,
+            analyst_plan=agents_out.analyst_plan,
+            rationale=agents_out.rationale,
+            max_rounds=int(agents_out.max_rounds),
+            next_round_index=int(agents_out.next_round_index),
+            focus_for_next_round=agents_out.focus_for_next_round,
+            openai_user=req.user,
+        )
+        token = resume_store.issue_token(snap)
+        if agents_out.stage == "pre":
+            prompt = "Start 1-round panel" if agents_out.requested_depth == "linear" else "Start multi-round panel"
+        else:
+            prompt = agents_out.focus_for_next_round or f"Continue to round {agents_out.next_round_index}"
+        await emit_progress(
+            on_progress,
+            {
+                "type": "discussion_approval_required",
+                "resume_token": token,
+                "pause_kind": "discussion",
+                "stage": agents_out.stage,
+                "requested_depth": agents_out.requested_depth,
+                "round_index": agents_out.next_round_index,
+                "max_rounds": agents_out.max_rounds,
+                "focus_for_next_round": agents_out.focus_for_next_round,
+                "rationale": agents_out.rationale,
+            },
+        )
+        return CompletionStreamPaused(
+            resume_token=token,
+            proposed_sub_question=prompt,
             rationale=agents_out.rationale,
         )
     await emit_progress(on_progress, {"type": "summarizing_started"})

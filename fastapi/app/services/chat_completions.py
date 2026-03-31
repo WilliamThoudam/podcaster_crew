@@ -40,11 +40,14 @@ from app.services.pulsecast_llm_agents import (
     LlmAgentsPausedWebSearch,
     run_llm_agents_after_web_hitl,
     run_llm_agents_host_only,
+    run_llm_agents_minimal_only,
     _emit_web_search_results_sse,
     _serper_results_markdown,
+    _run_llm_agents_moderated_discussion,
 )
 from app.services.pulsecast_resume_store import (
     DuplicateSubQuestionPausedSnapshot,
+    DiscussionPausedSnapshot,
     PulsecastPausedSnapshot,
     PulsecastPausedSnapshotUnion,
     WebSearchPausedSnapshot,
@@ -409,6 +412,279 @@ async def build_resume_payload(
     )
     return CompletionStreamComplete(content=agents_done.answer)
 
+
+async def _pause_from_discussion_agents_out(
+    *,
+    settings: Settings,
+    agents_out: Any,
+    openai_user: str | None,
+    on_progress: ProgressCallback | None,
+) -> CompletionStreamOutcome:
+    from app.services.pulsecast_llm_agents import LlmAgentsComplete, LlmAgentsPausedDiscussion
+
+    if isinstance(agents_out, LlmAgentsComplete):
+        return CompletionStreamComplete(content=agents_out.answer)
+
+    if isinstance(agents_out, LlmAgentsPausedWebSearch):
+        snap_ws = WebSearchPausedSnapshot(
+            stage="mid",
+            pipeline=agents_out.pipeline,
+            discussion=agents_out.discussion,
+            question=agents_out.question,
+            generated_sql=agents_out.generated_sql,
+            primary_exe=agents_out.primary_exe,
+            deterministic_summary=agents_out.deterministic_summary,
+            sub_results=agents_out.sub_results,
+            host_plan=agents_out.host_plan,
+            analyst_plan=agents_out.analyst_plan,
+            proposed_search_query=agents_out.proposed_search_query,
+            search_queries=agents_out.search_queries,
+            pending_search_index=agents_out.pending_search_index,
+            completed_web_results=agents_out.completed_web_results,
+            rationale=agents_out.rationale,
+            openai_user=openai_user,
+        )
+        token_ws = resume_store.issue_token(snap_ws)
+        n = len(agents_out.search_queries)
+        step = agents_out.pending_search_index + 1
+        await emit_progress(
+            on_progress,
+            {
+                "type": "web_search_approval_required",
+                "resume_token": token_ws,
+                "proposed_search_query": agents_out.proposed_search_query,
+                "rationale": agents_out.rationale,
+                "pause_kind": "web_search",
+                "web_search_step_index": step,
+                "web_search_total_steps": max(1, n),
+            },
+        )
+        return CompletionStreamPaused(
+            resume_token=token_ws,
+            proposed_sub_question=agents_out.proposed_search_query,
+            rationale=agents_out.rationale,
+        )
+
+    if isinstance(agents_out, LlmAgentsPaused):
+        snap = PulsecastPausedSnapshot(
+            pipeline=agents_out.pipeline,
+            discussion=agents_out.discussion,
+            question=agents_out.question,
+            generated_sql=agents_out.generated_sql,
+            primary_exe=agents_out.primary_exe,
+            deterministic_summary=agents_out.deterministic_summary,
+            sub_results=agents_out.sub_results,
+            host_plan=agents_out.host_plan,
+            analyst_plan=agents_out.analyst_plan,
+            proposed_sub_question=agents_out.proposed_sub_question,
+            rationale=agents_out.rationale,
+            openai_user=openai_user,
+        )
+        token = resume_store.issue_token(snap)
+        await emit_progress(
+            on_progress,
+            {
+                "type": "sql_approval_required",
+                "resume_token": token,
+                "proposed_sub_question": agents_out.proposed_sub_question,
+                "rationale": agents_out.rationale,
+                "pause_kind": "challenger_followup",
+            },
+        )
+        return CompletionStreamPaused(
+            resume_token=token,
+            proposed_sub_question=agents_out.proposed_sub_question,
+            rationale=agents_out.rationale,
+        )
+
+    if isinstance(agents_out, LlmAgentsPausedDiscussion):
+        snap_d = DiscussionPausedSnapshot(
+            stage=agents_out.stage,
+            requested_depth=agents_out.requested_depth,
+            pipeline=agents_out.pipeline,
+            discussion=agents_out.discussion,
+            question=agents_out.question,
+            generated_sql=agents_out.generated_sql,
+            primary_exe=agents_out.primary_exe,
+            deterministic_summary=agents_out.deterministic_summary,
+            sub_results=agents_out.sub_results,
+            host_plan=agents_out.host_plan,
+            analyst_plan=agents_out.analyst_plan,
+            rationale=agents_out.rationale,
+            max_rounds=int(agents_out.max_rounds),
+            next_round_index=int(agents_out.next_round_index),
+            focus_for_next_round=agents_out.focus_for_next_round,
+            openai_user=openai_user,
+        )
+        token_d = resume_store.issue_token(snap_d)
+        await emit_progress(
+            on_progress,
+            {
+                "type": "discussion_approval_required",
+                "resume_token": token_d,
+                "pause_kind": "discussion",
+                "stage": agents_out.stage,
+                "requested_depth": agents_out.requested_depth,
+                "round_index": agents_out.next_round_index,
+                "max_rounds": agents_out.max_rounds,
+                "focus_for_next_round": agents_out.focus_for_next_round,
+                "rationale": agents_out.rationale,
+            },
+        )
+        prompt = (
+            ("Start 1-round panel" if agents_out.requested_depth == "linear" else "Start multi-round panel")
+            if agents_out.stage == "pre"
+            else (agents_out.focus_for_next_round or f"Continue to round {agents_out.next_round_index}")
+        )
+        return CompletionStreamPaused(resume_token=token_d, proposed_sub_question=prompt, rationale=agents_out.rationale)
+
+    raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Unknown discussion outcome")
+
+
+async def build_resume_discussion_payload(
+    *,
+    settings: Settings,
+    snapshot: DiscussionPausedSnapshot,
+    approved: bool,
+    on_progress: ProgressCallback | None = None,
+) -> CompletionStreamComplete | CompletionStreamPaused:
+    # Decline starting moderated discussion -> minimal (ANALYST→HOST)
+    if snapshot.stage == "pre" and not approved:
+        agents_done = await run_llm_agents_minimal_only(
+            settings=settings,
+            question=snapshot.question,
+            generated_sql=snapshot.generated_sql,
+            exe=snapshot.primary_exe,
+            deterministic_summary=snapshot.deterministic_summary,
+            sub_results=list(snapshot.sub_results),
+            host_plan=snapshot.host_plan,
+            analyst_plan=snapshot.analyst_plan,
+            user_declined_web_search=False,
+            on_progress=on_progress,
+        )
+        return CompletionStreamComplete(content=agents_done.answer)
+
+    # Approve starting discussion (linear or moderated)
+    if snapshot.stage == "pre" and approved:
+        from app.services.pulsecast_llm_agents import _context_blob_compact
+
+        ctx = _context_blob_compact(
+            question=snapshot.question,
+            generated_sql=snapshot.generated_sql,
+            exe=snapshot.primary_exe,
+            deterministic_summary=snapshot.deterministic_summary,
+            sub_results=list(snapshot.sub_results),
+            host_plan=snapshot.host_plan,
+            analyst_plan=snapshot.analyst_plan,
+        )
+        if snapshot.requested_depth == "linear":
+            from app.services.pulsecast_llm_agents import _run_llm_agents_linear
+
+            agents_out = await _run_llm_agents_linear(
+                settings=settings,
+                question=snapshot.question,
+                generated_sql=snapshot.generated_sql,
+                exe=snapshot.primary_exe,
+                deterministic_summary=snapshot.deterministic_summary,
+                sr_list=list(snapshot.sub_results),
+                host_plan=snapshot.host_plan,
+                analyst_plan=snapshot.analyst_plan,
+                ctx=ctx,
+                allow_sql_approval_pause=True,
+                on_progress=on_progress,
+            )
+        else:
+            max_rounds = max(1, settings.pulsecast_discussion_max_rounds)
+            agents_out = await _run_llm_agents_moderated_discussion(
+                settings=settings,
+                question=snapshot.question,
+                generated_sql=snapshot.generated_sql,
+                exe=snapshot.primary_exe,
+                deterministic_summary=snapshot.deterministic_summary,
+                sr_list=list(snapshot.sub_results),
+                host_plan=snapshot.host_plan,
+                analyst_plan=snapshot.analyst_plan,
+                ctx=ctx,
+                allow_sql_approval_pause=True,
+                max_rounds=max_rounds,
+                on_progress=on_progress,
+            )
+        return await _pause_from_discussion_agents_out(
+            settings=settings,
+            agents_out=agents_out,
+            openai_user=snapshot.openai_user,
+            on_progress=on_progress,
+        )
+
+    # Between rounds: approved -> continue moderated; declined -> HOST finalize from transcript so far
+    if snapshot.stage == "mid" and not approved:
+        agents_done = await run_llm_agents_host_only(
+            settings=settings,
+            question=snapshot.question,
+            generated_sql=snapshot.generated_sql,
+            exe=snapshot.primary_exe,
+            deterministic_summary=snapshot.deterministic_summary,
+            sub_results=list(snapshot.sub_results),
+            host_plan=snapshot.host_plan,
+            analyst_plan=snapshot.analyst_plan,
+            discussion=snapshot.discussion,  # type: ignore[arg-type]
+            pipeline=snapshot.pipeline or [],
+            user_declined_extra_sql=False,
+        )
+        return CompletionStreamComplete(content=agents_done.answer)
+
+    if snapshot.stage == "mid" and approved:
+        from app.services.pulsecast_llm_agents import _context_blob_compact
+
+        ctx = _context_blob_compact(
+            question=snapshot.question,
+            generated_sql=snapshot.generated_sql,
+            exe=snapshot.primary_exe,
+            deterministic_summary=snapshot.deterministic_summary,
+            sub_results=list(snapshot.sub_results),
+            host_plan=snapshot.host_plan,
+            analyst_plan=snapshot.analyst_plan,
+        )
+        agents_out = await _run_llm_agents_moderated_discussion(
+            settings=settings,
+            question=snapshot.question,
+            generated_sql=snapshot.generated_sql,
+            exe=snapshot.primary_exe,
+            deterministic_summary=snapshot.deterministic_summary,
+            sr_list=list(snapshot.sub_results),
+            host_plan=snapshot.host_plan,
+            analyst_plan=snapshot.analyst_plan,
+            ctx=ctx,
+            allow_sql_approval_pause=True,
+            max_rounds=int(snapshot.max_rounds or settings.pulsecast_discussion_max_rounds),
+            on_progress=on_progress,
+            initial_discussion=snapshot.discussion,  # type: ignore[arg-type]
+            initial_pipeline=snapshot.pipeline,
+            start_round=int(snapshot.next_round_index or 1),
+            focus_for_next_round=(snapshot.focus_for_next_round or "").strip() or None,
+        )
+        return await _pause_from_discussion_agents_out(
+            settings=settings,
+            agents_out=agents_out,
+            openai_user=snapshot.openai_user,
+            on_progress=on_progress,
+        )
+
+    # Should not happen
+    agents_done = await run_llm_agents_host_only(
+        settings=settings,
+        question=snapshot.question,
+        generated_sql=snapshot.generated_sql,
+        exe=snapshot.primary_exe,
+        deterministic_summary=snapshot.deterministic_summary,
+        sub_results=list(snapshot.sub_results),
+        host_plan=snapshot.host_plan,
+        analyst_plan=snapshot.analyst_plan,
+        discussion=snapshot.discussion,  # type: ignore[arg-type]
+        pipeline=snapshot.pipeline or [],
+        user_declined_extra_sql=False,
+    )
+    return CompletionStreamComplete(content=agents_done.answer)
 
 def _openai_request_for_duplicate_snapshot(snap: DuplicateSubQuestionPausedSnapshot) -> OpenAIChatCompletionRequest:
     return OpenAIChatCompletionRequest(
@@ -775,6 +1051,13 @@ async def build_resume_dispatcher(
             snapshot=snapshot,
             approved=req.approved,
             edited_question=req.edited_question,
+            on_progress=on_progress,
+        )
+    if isinstance(snapshot, DiscussionPausedSnapshot):
+        return await build_resume_discussion_payload(
+            settings=settings,
+            snapshot=snapshot,
+            approved=req.approved,
             on_progress=on_progress,
         )
     return await build_resume_payload(

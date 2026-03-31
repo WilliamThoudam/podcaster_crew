@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     default_user_db_id: int = 1
     default_db_type: str = "snowflake"
     default_schema_name: str = "dev"
-    default_model: str = "openai/gpt-5.3-codex"
+    default_model: str = "solutionec/qwen2.5-coder-14b-awq"
     default_max_nodes: str = "15"
 
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
@@ -40,8 +40,6 @@ class Settings(BaseSettings):
     serper_num_results: int = 6
     web_search_summarize_enabled: bool = True
 
-    # Moderated Marketing/Finance/Challenger multi-round discussion (see pulsecast_llm_agents)
-    pulsecast_discussion_enabled: bool = True
     pulsecast_discussion_max_rounds: int = 3
 
     # Planner caps (Text-to-SQL + Web crawler steps)

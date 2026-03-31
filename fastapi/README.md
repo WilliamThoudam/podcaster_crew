@@ -74,7 +74,7 @@ The assistant `message.content` is a JSON string containing:
 ## Orchestration and LLM stack
 
 - **LangGraph** runs the main Pulsecast completion flow (`planning` → `sub_questions` → `agents`) in [`app/graph/pulsecast_graph.py`](app/graph/pulsecast_graph.py). Step implementations live in [`app/services/pulsecast_completion_steps.py`](app/services/pulsecast_completion_steps.py); SSE markers are unchanged for the frontend.
-- **HOST `discussion_depth`** (`minimal` \| `linear` \| `moderated`, default `moderated`): set during host planning JSON. **`minimal`** runs ANALYST then HOST only (Marketing/Finance/Challenger appear as skipped pipeline steps). **`linear`** runs one pass ANALYST → M → F → C → HOST. **`moderated`** uses multi-round discussion only when `pulsecast_discussion_enabled` is true in [`app/config.py`](app/config.py); if that flag is off, moderated requests use the linear path instead.
+- **HOST `discussion_depth`** (`minimal` \| `linear` \| `moderated`, default `moderated`): set during host planning JSON. **`minimal`** runs ANALYST then HOST only (Marketing/Finance/Challenger appear as skipped pipeline steps). **`linear`** runs one pass ANALYST → M → F → C → HOST. **`moderated`** uses a multi-round discussion loop (bounded by `pulsecast_discussion_max_rounds`).
 - **LangChain** is used as plumbing: **`langchain-openai`** `ChatOpenAI` (OpenAI-compatible `base_url`) and **`langchain-core`** messages in [`app/llm/chat_model.py`](app/llm/chat_model.py), planning, and multi-agent streaming.
 - Upgrade **`langgraph`**, **`langchain-core`**, and **`langchain-openai`** together when bumping versions.
 

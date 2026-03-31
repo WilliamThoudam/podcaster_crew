@@ -582,6 +582,25 @@ def _chunk_text(content: str | list[str | dict]) -> str:
             parts.append(block)
     return "".join(parts)
 
+async def _invoke_json_object(*, settings: Settings, messages: list[dict[str, str]]) -> str:
+    """
+    Force the model to return a single JSON object (no surrounding prose).
+    This avoids JSONDecodeError from unescaped control characters in string fields.
+    """
+    llm = build_chat_model(settings).bind(response_format={"type": "json_object"})
+    lc_messages: list[SystemMessage | HumanMessage] = []
+    for m in messages:
+        role, content = m["role"], m["content"]
+        if role == "system":
+            lc_messages.append(SystemMessage(content=content))
+        else:
+            lc_messages.append(HumanMessage(content=content))
+    resp = await llm.ainvoke(lc_messages)
+    text = _chunk_text(resp.content).strip()
+    if not text:
+        raise ValueError("Empty model content")
+    return text
+
 
 async def _stream_llm_text(*, settings: Settings, messages: list[dict[str, str]]) -> str:
     model = build_chat_model(settings)
@@ -791,7 +810,7 @@ async def _run_host_json(
     user_content: str,
 ) -> _HostOut:
     try:
-        text = await _stream_llm_text(
+        text = await _invoke_json_object(
             settings=settings,
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -800,7 +819,11 @@ async def _run_host_json(
         )
         if not text:
             raise ValueError(f"Empty streamed content from agent {role_label}")
-        return _parse_host_json(text)
+        obj = json.loads(text)
+        if not isinstance(obj, dict):
+            raise ValueError("Host output JSON must be an object")
+        obj = _normalize_host_out_dict(obj)
+        return _HostOut.model_validate(obj)
     except (ValueError, json.JSONDecodeError) as e:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -1242,7 +1265,7 @@ async def run_llm_agents(
     """
     Run internal enrichment, then HOST.
     Routing uses host_plan.discussion_depth: minimal (ANALYST→HOST), linear (single M→F→WC→C pass), or moderated
-    (multi-round when pulsecast_discussion_enabled). If moderated but discussion is globally disabled, uses linear.
+    (multi-round). If moderated is requested, run the multi-round discussion loop.
     If depth is minimal but analyst_plan.web_sub_questions is non-empty, depth is treated as linear so WEB_CRAWLER runs.
     If CHALLENGER requests more data and allow_sql_approval_pause, return LlmAgentsPaused (no HOST yet) — not on minimal path.
     """
@@ -1285,8 +1308,7 @@ async def run_llm_agents(
         )
 
     max_rounds = max(1, settings.pulsecast_discussion_max_rounds)
-    use_moderated = depth == "moderated" and settings.pulsecast_discussion_enabled
-    if use_moderated:
+    if depth == "moderated":
         return await _run_llm_agents_moderated_discussion(
             settings=settings,
             question=question,

@@ -537,18 +537,53 @@ export function Pulsecast() {
                     type="button"
                     className={`voice-btn${app.voiceRecording ? ' recording' : ''}`}
                     title="Voice input"
+                    disabled={app.qaStreaming && !app.streamPaused}
                     onClick={app.toggleVoice}
                   >
                     {app.voiceRecording ? '⏹' : '🎤'}
                   </button>
+                  {app.qaStreaming && app.streamJobId && !app.streamPaused ? (
+                    <button
+                      type="button"
+                      className="qa-stream-btn"
+                      title="Pause streaming (enables typing)"
+                      onClick={() => void app.pulsecastSetStreamPaused(true)}
+                    >
+                      ⏸
+                    </button>
+                  ) : null}
+                  {app.qaStreaming && app.streamJobId && app.streamPaused ? (
+                    <button
+                      type="button"
+                      className="qa-stream-btn"
+                      title="Resume streaming"
+                      onClick={() => void app.pulsecastSetStreamPaused(false)}
+                    >
+                      ▶
+                    </button>
+                  ) : null}
                   <input
                     className="qa-input"
-                    placeholder="Ask about the data… e.g. Compare with last week"
+                    placeholder={
+                      app.qaStreaming && !app.streamPaused
+                        ? 'Agents are responding… pause to type'
+                        : 'Ask about the data… e.g. Compare with last week'
+                    }
                     value={app.qaInput}
+                    disabled={app.qaStreaming && !app.streamPaused}
                     onChange={(e) => app.setQaInput(e.target.value)}
-                    onKeyDown={(e) => e.key === 'Enter' && app.sendQA()}
+                    onKeyDown={(e) =>
+                      e.key === 'Enter' &&
+                      !(app.qaStreaming && !app.streamPaused) &&
+                      app.sendQA()
+                    }
                   />
-                  <button type="button" className="qa-send" onClick={() => app.sendQA()}>
+                  <button
+                    type="button"
+                    className="qa-send"
+                    disabled={app.qaStreaming && !app.streamPaused}
+                    onClick={() => app.sendQA()}
+                  >
                     ➤
                   </button>
                 </div>

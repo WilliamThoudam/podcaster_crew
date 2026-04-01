@@ -26,6 +26,7 @@ Optional: copy or symlink the repo root `.env` here, or set variables in your en
 - `OPENAI_TIMEOUT_SECONDS` (optional; default `60`)
 - `DEFAULT_USER_ID`, `DEFAULT_USER_DB_ID`, `DEFAULT_DB_TYPE`, `DEFAULT_SCHEMA_NAME`, `DEFAULT_MODEL`, `DEFAULT_MAX_NODES`
 - `CORS_ORIGINS` (comma-separated, default includes `http://localhost:5173`)
+- **Stream pause** (`POST /v1/chat/completions/stream-control`): pause/resume is **in-memory** per API process. Use a **single Uvicorn worker** until you move stream state to Redis (multi-worker deployments would not share pause state).
 - `HTTP_TIMEOUT_SECONDS`
 - `SERPER_API_KEY` (optional; enables Web Crawler → user-approved Serper `google.serper.dev` search)
 

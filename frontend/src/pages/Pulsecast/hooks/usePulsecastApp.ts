@@ -10,6 +10,7 @@ import {
   TOTAL_MS,
 } from '../constants'
 import {
+  pulsecastStreamControl,
   streamPulsecastQa,
   streamPulsecastResume,
   type SqlHitlPauseKind,
@@ -540,6 +541,10 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
   const qaSessionRef = useRef<string | null>(null)
   const [qaMessages, setQaMessages] = useState<QaMessage[]>([])
   const [qaStreaming, setQaStreaming] = useState(false)
+  const [streamJobId, setStreamJobId] = useState<string | null>(null)
+  const [streamPaused, setStreamPaused] = useState(false)
+  const qaStreamAbortRef = useRef<AbortController | null>(null)
+  const streamJobIdRef = useRef<string | null>(null)
 
   const [agentStates, setAgentStates] = useState<AgentState[]>(() => AGENTS.map(() => 'idle'))
 
@@ -614,6 +619,24 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
     setToast({ message, visible: true })
     window.setTimeout(() => setToast((t) => ({ ...t, visible: false })), 2800)
   }, [])
+
+  const pulsecastSetStreamPaused = useCallback(
+    async (paused: boolean) => {
+      const jid = streamJobIdRef.current
+      if (!jid) return
+      try {
+        await pulsecastStreamControl({
+          job_id: jid,
+          paused,
+          user: qaSessionRef.current ?? undefined,
+        })
+        setStreamPaused(paused)
+      } catch (e) {
+        showToast(e instanceof Error ? e.message : String(e))
+      }
+    },
+    [showToast],
+  )
 
   const pausePlayback = useCallback(() => {
     setIsPlaying(false)
@@ -732,6 +755,12 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
     async (question?: string) => {
       const q = (question ?? qaInput).trim()
       if (!q) return
+      qaStreamAbortRef.current?.abort()
+      const ac = new AbortController()
+      qaStreamAbortRef.current = ac
+      setStreamPaused(false)
+      setStreamJobId(null)
+      streamJobIdRef.current = null
       setQaInput('')
       setQaMessages((m) => [
         ...m,
@@ -773,8 +802,22 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
             onDelta: stream.onDelta,
             onProgress: stream.onProgress,
           },
+          {
+            signal: ac.signal,
+            onStreamJobId: (id) => {
+              streamJobIdRef.current = id
+              setStreamJobId(id)
+            },
+          },
         )
         setAgentStates(AGENTS.map(() => 'idle'))
+        if (result.kind === 'aborted') {
+          if (stream?.getTypingBubbleCreated()) {
+            const streamMsgId = stream.getSummarizingMsgId() ?? typingId
+            setQaMessages((m) => m.filter((msgItem) => msgItem.id !== streamMsgId))
+          }
+          return
+        }
         if (result.kind === 'sql_approval_required') {
           const sid = stream.getSummarizingMsgId()
           const pk = result.pause_kind ?? 'challenger_followup'
@@ -888,7 +931,13 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
           },
         ])
       } finally {
+        // A newer sendQA / HITL resume may have replaced the controller; do not wipe its state.
+        if (qaStreamAbortRef.current !== ac) return
+        streamJobIdRef.current = null
+        setStreamJobId(null)
+        setStreamPaused(false)
         setQaStreaming(false)
+        qaStreamAbortRef.current = null
       }
     },
     [qaInput, qaMessages, setThinkingRole],
@@ -898,6 +947,12 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
     async (approved: boolean) => {
       const token = sqlHitlToken
       if (!token) return
+      qaStreamAbortRef.current?.abort()
+      const ac = new AbortController()
+      qaStreamAbortRef.current = ac
+      setStreamPaused(false)
+      setStreamJobId(null)
+      streamJobIdRef.current = null
       setSqlHitlOpen(false)
       setQaStreaming(true)
       setAgentStates(AGENTS.map(() => 'idle'))
@@ -917,8 +972,22 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
             onDelta: stream.onDelta,
             onProgress: stream.onProgress,
           },
+          {
+            signal: ac.signal,
+            onStreamJobId: (id) => {
+              streamJobIdRef.current = id
+              setStreamJobId(id)
+            },
+          },
         )
         setAgentStates(AGENTS.map(() => 'idle'))
+        if (result.kind === 'aborted') {
+          if (stream?.getTypingBubbleCreated()) {
+            const streamMsgId = stream.getSummarizingMsgId() ?? typingId
+            setQaMessages((m) => m.filter((msgItem) => msgItem.id !== streamMsgId))
+          }
+          return
+        }
         if (result.kind === 'sql_approval_required') {
           const pk = result.pause_kind ?? 'challenger_followup'
           setSqlHitlPauseKind(pk)
@@ -992,7 +1061,12 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
           },
         ])
       } finally {
+        if (qaStreamAbortRef.current !== ac) return
+        streamJobIdRef.current = null
+        setStreamJobId(null)
+        setStreamPaused(false)
         setQaStreaming(false)
+        qaStreamAbortRef.current = null
       }
     },
     [setThinkingRole, sqlHitlEdited, sqlHitlToken],
@@ -1002,6 +1076,12 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
     async (approved: boolean) => {
       const token = discussionHitlToken
       if (!token) return
+      qaStreamAbortRef.current?.abort()
+      const ac = new AbortController()
+      qaStreamAbortRef.current = ac
+      setStreamPaused(false)
+      setStreamJobId(null)
+      streamJobIdRef.current = null
       setDiscussionHitlOpen(false)
       setQaStreaming(true)
       setAgentStates(AGENTS.map(() => 'idle'))
@@ -1019,8 +1099,22 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
             onDelta: stream.onDelta,
             onProgress: stream.onProgress,
           },
+          {
+            signal: ac.signal,
+            onStreamJobId: (id) => {
+              streamJobIdRef.current = id
+              setStreamJobId(id)
+            },
+          },
         )
         setAgentStates(AGENTS.map(() => 'idle'))
+        if (result.kind === 'aborted') {
+          if (stream?.getTypingBubbleCreated()) {
+            const streamMsgId = stream.getSummarizingMsgId() ?? typingId
+            setQaMessages((m) => m.filter((msgItem) => msgItem.id !== streamMsgId))
+          }
+          return
+        }
         if (result.kind === 'sql_approval_required') {
           const pk = result.pause_kind ?? 'challenger_followup'
           setSqlHitlPauseKind(pk)
@@ -1094,7 +1188,12 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
           },
         ])
       } finally {
+        if (qaStreamAbortRef.current !== ac) return
+        streamJobIdRef.current = null
+        setStreamJobId(null)
+        setStreamPaused(false)
         setQaStreaming(false)
+        qaStreamAbortRef.current = null
       }
     },
     [discussionHitlToken, setThinkingRole],
@@ -1221,6 +1320,9 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
     sendQA,
     qaMessages,
     qaStreaming,
+    streamJobId,
+    streamPaused,
+    pulsecastSetStreamPaused,
     agentStates,
     voiceRecording,
     toggleVoice,

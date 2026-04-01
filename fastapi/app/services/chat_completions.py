@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import time
 import uuid
@@ -60,6 +61,7 @@ from app.services.pulsecast_sse_emit import (
     emit_progress,
     emit_text_chunks,
 )
+from app.services.stream_pause_store import stream_pause_store
 from app.services.qa_pipeline import build_answer_summary, validate_and_normalize_sql
 from app.clients.serper_search import serper_google_search
 
@@ -134,6 +136,16 @@ def _chunk_json(
         ],
     )
     return chunk.model_dump_json()
+
+
+async def _gated_yields(job_id: str, line: str) -> AsyncIterator[str]:
+    for part in await stream_pause_store.emit_line(job_id, line):
+        yield part
+
+
+async def _drain_gated_yields(job_id: str) -> AsyncIterator[str]:
+    for part in await stream_pause_store.drain_outbound(job_id):
+        yield part
 
 
 async def build_completion_payload(
@@ -1068,10 +1080,13 @@ async def stream_resume_sse(
     settings: Settings,
     req: PulsecastChatResumeRequest,
     snapshot: PulsecastPausedSnapshotUnion,
+    job_id: str,
 ) -> AsyncIterator[str]:
+    await stream_pause_store.register(job_id, req.user)
     completion_id = f"chatcmpl_{uuid.uuid4().hex}"
     progress_q: asyncio.Queue[str] = asyncio.Queue()
     started = False
+    task: asyncio.Task[CompletionStreamOutcome] | None = None
 
     async def on_progress(event: dict[str, Any]) -> None:
         marker = f"<<PULSECAST_PROGRESS:{json.dumps(event, ensure_ascii=False)}>>"
@@ -1086,128 +1101,273 @@ async def stream_resume_sse(
         )
     )
 
-    while True:
-        if task.done() and progress_q.empty():
-            break
-        try:
-            marker = await asyncio.wait_for(progress_q.get(), timeout=0.1)
-        except TimeoutError:
-            continue
-        if not started:
-            started = True
-            yield f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), role='assistant')}\n\n"
-        yield f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), content=marker)}\n\n"
-
     try:
-        outcome = await task
-    except HTTPException as e:
+        while True:
+            if task.done() and progress_q.empty():
+                break
+            try:
+                marker = await asyncio.wait_for(progress_q.get(), timeout=0.1)
+            except TimeoutError:
+                continue
+            if not started:
+                started = True
+                async for line in _gated_yields(
+                    job_id,
+                    f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), role='assistant')}\n\n",
+                ):
+                    yield line
+            async for line in _gated_yields(
+                job_id,
+                f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), content=marker)}\n\n",
+            ):
+                yield line
+
+        try:
+            outcome = await task
+        except HTTPException as e:
+            if not started:
+                started = True
+                async for line in _gated_yields(
+                    job_id,
+                    f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), role='assistant')}\n\n",
+                ):
+                    yield line
+
+            plain = _extract_upstream_error_text(e.detail) or (
+                str(e.detail) if e.detail is not None else str(e)
+            )
+            async for line in _drain_gated_yields(job_id):
+                yield line
+            async for line in _gated_yields(
+                job_id,
+                f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), content=plain)}\n\n",
+            ):
+                yield line
+            async for line in _gated_yields(
+                job_id,
+                f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), finish_reason='stop')}\n\n",
+            ):
+                yield line
+            async for line in _gated_yields(job_id, "data: [DONE]\n\n"):
+                yield line
+            return
+        except Exception as e:
+            if not started:
+                raise
+            error_text = f"Failed to generate response: {e}"
+            async for line in _drain_gated_yields(job_id):
+                yield line
+            async for line in _gated_yields(
+                job_id,
+                f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), content=error_text)}\n\n",
+            ):
+                yield line
+            async for line in _gated_yields(
+                job_id,
+                f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), finish_reason='stop')}\n\n",
+            ):
+                yield line
+            async for line in _gated_yields(job_id, "data: [DONE]\n\n"):
+                yield line
+            return
+
+        if isinstance(outcome, CompletionStreamPaused):
+            if not started:
+                started = True
+                async for line in _gated_yields(
+                    job_id,
+                    f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), role='assistant')}\n\n",
+                ):
+                    yield line
+            async for line in _drain_gated_yields(job_id):
+                yield line
+            async for line in _gated_yields(
+                job_id,
+                f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), finish_reason='stop')}\n\n",
+            ):
+                yield line
+            async for line in _gated_yields(job_id, "data: [DONE]\n\n"):
+                yield line
+            return
+
         if not started:
             started = True
-            yield f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), role='assistant')}\n\n"
+            async for line in _gated_yields(
+                job_id,
+                f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), role='assistant')}\n\n",
+            ):
+                yield line
 
-        # Prefer a plain, user-facing error line (shown as HOST in the UI)
-        plain = _extract_upstream_error_text(e.detail) or (str(e.detail) if e.detail is not None else str(e))
-        yield f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), content=plain)}\n\n"
-        yield f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), finish_reason='stop')}\n\n"
-        yield "data: [DONE]\n\n"
-        return
-    except Exception as e:
-        if not started:
-            raise
-        error_text = f"Failed to generate response: {e}"
-        yield f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), content=error_text)}\n\n"
-        yield f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), finish_reason='stop')}\n\n"
-        yield "data: [DONE]\n\n"
-        return
+        content = outcome.content
+        for i in range(0, len(content), STREAM_CHUNK_SIZE):
+            part = content[i : i + STREAM_CHUNK_SIZE]
+            async for line in _gated_yields(
+                job_id,
+                f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), content=part)}\n\n",
+            ):
+                yield line
+            await asyncio.sleep(STREAM_DELAY_S)
 
-    if isinstance(outcome, CompletionStreamPaused):
-        if not started:
-            started = True
-            yield f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), role='assistant')}\n\n"
-        yield f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), finish_reason='stop')}\n\n"
-        yield "data: [DONE]\n\n"
-        return
-
-    if not started:
-        started = True
-        yield f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), role='assistant')}\n\n"
-
-    content = outcome.content
-    for i in range(0, len(content), STREAM_CHUNK_SIZE):
-        part = content[i : i + STREAM_CHUNK_SIZE]
-        yield f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), content=part)}\n\n"
-        await asyncio.sleep(STREAM_DELAY_S)
-
-    yield f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), finish_reason='stop')}\n\n"
-    yield "data: [DONE]\n\n"
+        async for line in _drain_gated_yields(job_id):
+            yield line
+        async for line in _gated_yields(
+            job_id,
+            f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), finish_reason='stop')}\n\n",
+        ):
+            yield line
+        async for line in _gated_yields(job_id, "data: [DONE]\n\n"):
+            yield line
+    except asyncio.CancelledError:
+        raise
+    finally:
+        if task is not None and not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        await stream_pause_store.unregister(job_id)
 
 
 async def stream_completion_sse(
     *,
     settings: Settings,
     req: OpenAIChatCompletionRequest,
+    job_id: str,
 ) -> AsyncIterator[str]:
+    await stream_pause_store.register(job_id, req.user)
     completion_id = f"chatcmpl_{uuid.uuid4().hex}"
     progress_q: asyncio.Queue[str] = asyncio.Queue()
     started = False
+    task: asyncio.Task[CompletionStreamOutcome] | None = None
 
     async def on_progress(event: dict[str, Any]) -> None:
         marker = f"<<PULSECAST_PROGRESS:{json.dumps(event, ensure_ascii=False)}>>"
         await progress_q.put(marker)
 
-    task = asyncio.create_task(build_completion_payload(settings=settings, req=req, on_progress=on_progress))
-
-    while True:
-        if task.done() and progress_q.empty():
-            break
-        try:
-            marker = await asyncio.wait_for(progress_q.get(), timeout=0.1)
-        except TimeoutError:
-            continue
-        if not started:
-            started = True
-            yield f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), role='assistant')}\n\n"
-        yield f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), content=marker)}\n\n"
+    task = asyncio.create_task(
+        build_completion_payload(settings=settings, req=req, on_progress=on_progress)
+    )
 
     try:
-        outcome = await task
-    except HTTPException as e:
+        while True:
+            if task.done() and progress_q.empty():
+                break
+            try:
+                marker = await asyncio.wait_for(progress_q.get(), timeout=0.1)
+            except TimeoutError:
+                continue
+            if not started:
+                started = True
+                async for line in _gated_yields(
+                    job_id,
+                    f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), role='assistant')}\n\n",
+                ):
+                    yield line
+            async for line in _gated_yields(
+                job_id,
+                f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), content=marker)}\n\n",
+            ):
+                yield line
+
+        try:
+            outcome = await task
+        except HTTPException as e:
+            if not started:
+                started = True
+                async for line in _gated_yields(
+                    job_id,
+                    f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), role='assistant')}\n\n",
+                ):
+                    yield line
+
+            plain = _extract_upstream_error_text(e.detail) or (
+                str(e.detail) if e.detail is not None else str(e)
+            )
+            async for line in _drain_gated_yields(job_id):
+                yield line
+            async for line in _gated_yields(
+                job_id,
+                f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), content=plain)}\n\n",
+            ):
+                yield line
+            async for line in _gated_yields(
+                job_id,
+                f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), finish_reason='stop')}\n\n",
+            ):
+                yield line
+            async for line in _gated_yields(job_id, "data: [DONE]\n\n"):
+                yield line
+            return
+        except Exception as e:
+            if not started:
+                raise
+            error_text = f"Failed to generate response: {e}"
+            async for line in _drain_gated_yields(job_id):
+                yield line
+            async for line in _gated_yields(
+                job_id,
+                f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), content=error_text)}\n\n",
+            ):
+                yield line
+            async for line in _gated_yields(
+                job_id,
+                f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), finish_reason='stop')}\n\n",
+            ):
+                yield line
+            async for line in _gated_yields(job_id, "data: [DONE]\n\n"):
+                yield line
+            return
+
+        if isinstance(outcome, CompletionStreamPaused):
+            if not started:
+                started = True
+                async for line in _gated_yields(
+                    job_id,
+                    f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), role='assistant')}\n\n",
+                ):
+                    yield line
+            async for line in _drain_gated_yields(job_id):
+                yield line
+            async for line in _gated_yields(
+                job_id,
+                f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), finish_reason='stop')}\n\n",
+            ):
+                yield line
+            async for line in _gated_yields(job_id, "data: [DONE]\n\n"):
+                yield line
+            return
+
         if not started:
             started = True
-            yield f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), role='assistant')}\n\n"
+            async for line in _gated_yields(
+                job_id,
+                f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), role='assistant')}\n\n",
+            ):
+                yield line
 
-        plain = _extract_upstream_error_text(e.detail) or (str(e.detail) if e.detail is not None else str(e))
-        yield f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), content=plain)}\n\n"
-        yield f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), finish_reason='stop')}\n\n"
-        yield "data: [DONE]\n\n"
-        return
-    except Exception as e:
-        if not started:
-            raise
-        error_text = f"Failed to generate response: {e}"
-        yield f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), content=error_text)}\n\n"
-        yield f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), finish_reason='stop')}\n\n"
-        yield "data: [DONE]\n\n"
-        return
+        content = outcome.content
+        for i in range(0, len(content), STREAM_CHUNK_SIZE):
+            part = content[i : i + STREAM_CHUNK_SIZE]
+            async for line in _gated_yields(
+                job_id,
+                f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), content=part)}\n\n",
+            ):
+                yield line
+            await asyncio.sleep(STREAM_DELAY_S)
 
-    if isinstance(outcome, CompletionStreamPaused):
-        if not started:
-            started = True
-            yield f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), role='assistant')}\n\n"
-        yield f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), finish_reason='stop')}\n\n"
-        yield "data: [DONE]\n\n"
-        return
-
-    if not started:
-        started = True
-        yield f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), role='assistant')}\n\n"
-
-    content = outcome.content
-    # Same chunk size + delay as PULSECAST_PROGRESS streams (see STREAM_* at top of module).
-    for i in range(0, len(content), STREAM_CHUNK_SIZE):
-        part = content[i : i + STREAM_CHUNK_SIZE]
-        yield f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), content=part)}\n\n"
-        await asyncio.sleep(STREAM_DELAY_S)
-
-    yield f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), finish_reason='stop')}\n\n"
-    yield "data: [DONE]\n\n"
+        async for line in _drain_gated_yields(job_id):
+            yield line
+        async for line in _gated_yields(
+            job_id,
+            f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), finish_reason='stop')}\n\n",
+        ):
+            yield line
+        async for line in _gated_yields(job_id, "data: [DONE]\n\n"):
+            yield line
+    except asyncio.CancelledError:
+        raise
+    finally:
+        if task is not None and not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        await stream_pause_store.unregister(job_id)

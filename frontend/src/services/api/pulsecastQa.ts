@@ -86,9 +86,17 @@ type StreamCallbacks = {
   onProgress?: (event: StreamProgressEvent) => void
 }
 
+/** Optional controls for streaming QA/resume requests. */
+export type PulsecastStreamOptions = {
+  signal?: AbortSignal
+  /** Called with job id from response headers before the SSE body is consumed (for pause/resume). */
+  onStreamJobId?: (jobId: string) => void
+}
+
 export type SqlHitlPauseKind = 'challenger_followup' | 'duplicate_sub_question' | 'web_search'
 
 export type StreamQaOutcome =
+  | { kind: 'aborted' }
   | { kind: 'complete'; answer: string }
   | {
       kind: 'sql_approval_required'
@@ -269,6 +277,7 @@ function parseSseEvents(chunk: string): string[] {
 }
 
 type ConsumeSseResult =
+  | { outcome: 'aborted' }
   | { outcome: 'complete'; assembled: string }
   | {
       outcome: 'sql_approval_required'
@@ -290,12 +299,24 @@ type ConsumeSseResult =
       rationale: string | null
     }
 
+function isAbortError(e: unknown): boolean {
+  return (
+    (e instanceof DOMException && e.name === 'AbortError') ||
+    (typeof e === 'object' &&
+      e !== null &&
+      'name' in e &&
+      (e as { name: string }).name === 'AbortError')
+  )
+}
+
 async function consumeSseChatStream(
   res: Response,
   callbacks?: StreamCallbacks,
+  streamOptions?: PulsecastStreamOptions,
 ): Promise<ConsumeSseResult> {
   if (!res.body) throw new Error('Streaming response body is unavailable')
 
+  const signal = streamOptions?.signal
   const reader = res.body.getReader()
   const decoder = new TextDecoder()
   let rawBuffer = ''
@@ -322,9 +343,21 @@ async function consumeSseChatStream(
       }
     | undefined
 
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
+  try {
+    while (true) {
+      if (signal?.aborted) {
+        await reader.cancel().catch(() => {})
+        return { outcome: 'aborted' }
+      }
+      let chunk: ReadableStreamReadResult<Uint8Array>
+      try {
+        chunk = await reader.read()
+      } catch (e) {
+        if (isAbortError(e)) return { outcome: 'aborted' }
+        throw e
+      }
+      const { done, value } = chunk
+      if (done) break
     rawBuffer += decoder.decode(value, { stream: true })
 
     const boundary = rawBuffer.lastIndexOf('\n\n')
@@ -381,6 +414,10 @@ async function consumeSseChatStream(
         callbacks?.onDelta?.(delta)
       }
     }
+    }
+  } catch (e) {
+    if (isAbortError(e)) return { outcome: 'aborted' }
+    throw e
   }
 
   if (!assembled.trim()) {
@@ -412,24 +449,19 @@ async function consumeSseChatStream(
   return { outcome: 'complete', assembled }
 }
 
-export async function streamPulsecastQa(
-  body: QARequestBody,
-  callbacks?: StreamCallbacks,
-): Promise<StreamQaOutcome> {
-  const req: OpenAIChatRequest = {
-    model: 'pulsecast-qa',
-    stream: true,
-    messages:
-      body.messages && body.messages.length > 0
-        ? body.messages
-        : [{ role: 'user', content: body.question }],
-    response_format: { type: 'text' },
-    user: body.session_id,
-  }
-  const res = await fetch(`${apiBase()}/v1/chat/completions`, {
+export async function pulsecastStreamControl(body: {
+  job_id: string
+  paused: boolean
+  user?: string
+}): Promise<void> {
+  const res = await fetch(`${apiBase()}/v1/chat/completions/stream-control`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(req),
+    body: JSON.stringify({
+      job_id: body.job_id,
+      paused: body.paused,
+      user: body.user ?? null,
+    }),
   })
   if (!res.ok) {
     let msg = res.statusText
@@ -442,8 +474,52 @@ export async function streamPulsecastQa(
     }
     throw new Error(msg)
   }
+}
 
-  const raw = await consumeSseChatStream(res, callbacks)
+export async function streamPulsecastQa(
+  body: QARequestBody,
+  callbacks?: StreamCallbacks,
+  streamOptions?: PulsecastStreamOptions,
+): Promise<StreamQaOutcome> {
+  const req: OpenAIChatRequest = {
+    model: 'pulsecast-qa',
+    stream: true,
+    messages:
+      body.messages && body.messages.length > 0
+        ? body.messages
+        : [{ role: 'user', content: body.question }],
+    response_format: { type: 'text' },
+    user: body.session_id,
+  }
+  let res: Response
+  try {
+    res = await fetch(`${apiBase()}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req),
+      signal: streamOptions?.signal,
+    })
+  } catch (e) {
+    if (isAbortError(e)) return { kind: 'aborted' }
+    throw e
+  }
+  if (!res.ok) {
+    let msg = res.statusText
+    try {
+      const j = (await res.json()) as { error?: { message?: unknown }; detail?: unknown }
+      if (j.error?.message !== undefined) msg = parseDetail(j.error.message)
+      else if (j.detail !== undefined) msg = parseDetail(j.detail)
+    } catch {
+      /* ignore */
+    }
+    throw new Error(msg)
+  }
+
+  const jobHeader = res.headers.get('X-Pulsecast-Stream-Job-Id')
+  if (jobHeader) streamOptions?.onStreamJobId?.(jobHeader)
+
+  const raw = await consumeSseChatStream(res, callbacks, streamOptions)
+  if (raw.outcome === 'aborted') return { kind: 'aborted' }
   if (raw.outcome === 'sql_approval_required') {
     return {
       kind: 'sql_approval_required',
@@ -473,6 +549,7 @@ export async function streamPulsecastQa(
 export async function streamPulsecastResume(
   body: PulsecastResumeRequestBody,
   callbacks?: StreamCallbacks,
+  streamOptions?: PulsecastStreamOptions,
 ): Promise<StreamQaOutcome> {
   const req = {
     model: 'pulsecast-qa',
@@ -482,11 +559,18 @@ export async function streamPulsecastResume(
     edited_question: body.edited_question,
     user: body.session_id,
   }
-  const res = await fetch(`${apiBase()}/v1/chat/completions/resume`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(req),
-  })
+  let res: Response
+  try {
+    res = await fetch(`${apiBase()}/v1/chat/completions/resume`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req),
+      signal: streamOptions?.signal,
+    })
+  } catch (e) {
+    if (isAbortError(e)) return { kind: 'aborted' }
+    throw e
+  }
   if (!res.ok) {
     let msg = res.statusText
     try {
@@ -498,7 +582,12 @@ export async function streamPulsecastResume(
     }
     throw new Error(msg)
   }
-  const raw = await consumeSseChatStream(res, callbacks)
+
+  const jobHeader = res.headers.get('X-Pulsecast-Stream-Job-Id')
+  if (jobHeader) streamOptions?.onStreamJobId?.(jobHeader)
+
+  const raw = await consumeSseChatStream(res, callbacks, streamOptions)
+  if (raw.outcome === 'aborted') return { kind: 'aborted' }
   if (raw.outcome === 'sql_approval_required') {
     return {
       kind: 'sql_approval_required',

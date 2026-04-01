@@ -18,6 +18,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Pulsecast-Stream-Job-Id"],
 )
 
 app.include_router(chat_completions.router)

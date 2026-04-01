@@ -878,6 +878,34 @@ body::before {
 
 .qa-send:hover { transform: scale(1.08); }
 
+.qa-send:disabled,
+.voice-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.qa-stream-btn {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: var(--surface2);
+  border: 1px solid var(--border2);
+  color: var(--text);
+  font-size: 16px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: border-color 0.2s, background 0.2s;
+}
+
+.qa-stream-btn:hover {
+  border-color: var(--accent);
+  background: rgba(255, 107, 53, 0.08);
+}
+
 .voice-btn {
   width: 44px; height: 44px;
   border-radius: 50%;

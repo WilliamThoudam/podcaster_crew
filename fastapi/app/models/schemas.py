@@ -35,6 +35,15 @@ class PulsecastChatResumeRequest(BaseModel):
     edited_question: str | None = None
     stream: bool = True
     model: str = "pulsecast-qa"
+    user: str | None = None
+
+
+class PulsecastStreamControlRequest(BaseModel):
+    """Pause or resume outbound SSE for an active chat completion stream."""
+
+    job_id: str = Field(..., min_length=1)
+    paused: bool
+    user: str | None = None
 
 
 class TextToSqlResponse(BaseModel):

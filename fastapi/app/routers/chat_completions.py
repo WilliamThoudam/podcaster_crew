@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, status
+import uuid
+
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from fastapi.responses import StreamingResponse
 
 from app.config import Settings, get_settings
@@ -10,8 +12,10 @@ from app.models.schemas import (
     OpenAIModelsListResponse,
     OpenAIModelCard,
     PulsecastChatResumeRequest,
+    PulsecastStreamControlRequest,
 )
 from app.services.chat_completions import stream_completion_sse, stream_resume_sse
+from app.services.stream_pause_store import stream_pause_store
 from app.services.pulsecast_resume_store import (
     DuplicateSubQuestionPausedSnapshot,
     PulsecastPausedSnapshot,
@@ -41,10 +45,15 @@ async def chat_completions(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="stream must be true for this service",
         )
+    job_id = uuid.uuid4().hex
     return StreamingResponse(
-        stream_completion_sse(settings=settings, req=body),
+        stream_completion_sse(settings=settings, req=body, job_id=job_id),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Pulsecast-Stream-Job-Id": job_id,
+        },
     )
 
 
@@ -79,8 +88,32 @@ async def chat_completions_resume(
                     "message": "Question must be a single declarative analytics ask; edit and try again.",
                 },
             )
+    job_id = uuid.uuid4().hex
     return StreamingResponse(
-        stream_resume_sse(settings=settings, req=body, snapshot=snapshot),
+        stream_resume_sse(settings=settings, req=body, snapshot=snapshot, job_id=job_id),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Pulsecast-Stream-Job-Id": job_id,
+        },
     )
+
+
+@router.post("/v1/chat/completions/stream-control")
+async def pulsecast_stream_control(
+    body: PulsecastStreamControlRequest,
+) -> Response:
+    try:
+        await stream_pause_store.set_paused(body.job_id, body.paused, body.user)
+    except KeyError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Unknown or expired stream job_id",
+        )
+    except PermissionError:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="user does not match this stream job",
+        )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

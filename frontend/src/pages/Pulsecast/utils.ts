@@ -34,6 +34,40 @@ function tryStripOuterDelimiter(markdown: string, open: string, close: string): 
 }
 
 /**
+ * Some model outputs try to wrap multi-line lists in `_..._`, but CommonMark emphasis cannot cross
+ * block boundaries. That produces stray underscores like `_- item` or `..._` at line ends.
+ * This pass removes *line-wrapper* underscores only when they appear as standalone wrappers
+ * around list-like lines (keeps normal underscores inside words).
+ */
+function stripDanglingLineEmphasis(markdown: string): string {
+  const lines = markdown.split('\n')
+  const out = lines.map((line) => {
+    // Preserve original indentation.
+    const m = line.match(/^(\s*)(.*)$/)
+    const indent = m?.[1] ?? ''
+    let body = m?.[2] ?? line
+
+    // Remove a leading "_" that directly precedes a list marker or em-dash bullet.
+    // Examples: "_- A. ..."  "_* item"  "_— A. ..."  "_1. item"
+    if (
+      body.startsWith('_') &&
+      /^_(?:\s*)(?:[-*+]|—|\d{1,3}\.)\s+/.test(body)
+    ) {
+      body = body.replace(/^_/, '')
+    }
+
+    // Remove a trailing "_" that appears to close a line-wrapper emphasis.
+    // Example: "... averages._" or "..._)_" (we keep punctuation).
+    if (/_\s*$/.test(body) && /[).,!?:;]_\s*$/.test(body)) {
+      body = body.replace(/_\s*$/, '')
+    }
+
+    return indent + body
+  })
+  return out.join('\n')
+}
+
+/**
  * LLMs often wrap a whole section in `_..._` or `*...*` for emphasis, but CommonMark only allows
  * emphasis inside a single block — lists and paragraph breaks break pairing, so delimiters show as
  * literal characters. Strip one outer wrapper when it clearly spans blocks.
@@ -58,6 +92,9 @@ export function normalizePulsecastMarkdown(markdown: string): string {
       }
     }
     if (!changed) break
+  }
+  if (hasBlockMarkdownStructure(s)) {
+    s = stripDanglingLineEmphasis(s)
   }
   return s
 }

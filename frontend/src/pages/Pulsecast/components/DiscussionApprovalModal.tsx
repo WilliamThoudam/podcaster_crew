@@ -1,3 +1,5 @@
+import { PulsecastMarkdown } from './PulsecastMarkdown'
+
 type DiscussionApprovalModalProps = {
   open: boolean
   disabled?: boolean
@@ -53,7 +55,7 @@ export function DiscussionApprovalModal(props: DiscussionApprovalModalProps) {
         ) : null}
         {rationale ? (
           <p className="sql-hitl-rationale" style={{ color: 'var(--text2)', fontSize: '0.9rem' }}>
-            {rationale}
+            <PulsecastMarkdown content={rationale} />
           </p>
         ) : null}
         <div className="interrupt-actions">

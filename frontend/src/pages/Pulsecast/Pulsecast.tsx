@@ -600,7 +600,7 @@ export function Pulsecast() {
           </p>
           {app.sqlHitlRationale ? (
             <p className="sql-hitl-rationale" style={{ color: 'var(--text2)', fontSize: '0.9rem' }}>
-              {app.sqlHitlRationale}
+              <PulsecastMarkdown content={app.sqlHitlRationale} />
             </p>
           ) : null}
           <label className="section-label" style={{ marginTop: 8 }}>

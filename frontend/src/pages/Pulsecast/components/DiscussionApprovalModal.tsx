@@ -34,12 +34,12 @@ export function DiscussionApprovalModal(props: DiscussionApprovalModalProps) {
         : 'Start Panel Discussion'
       : `Continue to Round ${roundIndex} of ${maxRounds}`
 
-    const body =
-      stage === 'pre'
-        ? requestedDepth === 'linear'
-          ? 'Runs one round with all agents, then gives the final answer.'
-          : 'Runs a multi-round panel discussion before the final answer.'
-        : 'Continue the discussion to improve or validate the answer.';
+  const body =
+    stage === 'pre'
+      ? requestedDepth === 'linear'
+        ? 'This will run a discussion (Analyst, Marketing, Finance, Web Crawler, Challenger) before the Host final answer.'
+        : 'This will run a panel discussion (Analyst, Marketing, Finance, Web Crawler, Challenger) that may continue for multiple rounds before the Host final answer.'
+      : 'Challenger recommends continuing the discussion to deepen or validate the analysis.'
 
   return (
     <div className={`interrupt-overlay${open ? ' show' : ''}`}>

@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     default_user_db_id: int = 1
     default_db_type: str = "snowflake"
     default_schema_name: str = "dev"
-    default_model: str = "solutionec/qwen2.5-coder-14b-awq"
+    default_model: str = "huggingface/Qwen/Qwen2.5-Coder-32B-Instruct"
     default_max_nodes: str = "15"
 
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"

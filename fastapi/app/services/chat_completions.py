@@ -445,8 +445,6 @@ async def _pause_from_discussion_agents_out(
             openai_user=openai_user,
         )
         token_ws = resume_store.issue_token(snap_ws)
-        n = len(agents_out.search_queries)
-        step = agents_out.pending_search_index + 1
         await emit_progress(
             on_progress,
             {
@@ -455,8 +453,8 @@ async def _pause_from_discussion_agents_out(
                 "proposed_search_query": agents_out.proposed_search_query,
                 "rationale": agents_out.rationale,
                 "pause_kind": "web_search",
-                "web_search_step_index": step,
-                "web_search_total_steps": max(1, n),
+                "web_search_step_index": 1,
+                "web_search_total_steps": 1,
             },
         )
         return CompletionStreamPaused(
@@ -890,8 +888,6 @@ async def build_resume_web_search_payload(
                 openai_user=snapshot.openai_user,
             )
             token_ws = resume_store.issue_token(snap_ws)
-            n = len(queries)
-            step_no = (idx + 1) + 1
             await emit_progress(
                 on_progress,
                 {
@@ -900,8 +896,8 @@ async def build_resume_web_search_payload(
                     "proposed_search_query": snap_ws.proposed_search_query,
                     "rationale": snap_ws.rationale,
                     "pause_kind": "web_search",
-                    "web_search_step_index": step_no,
-                    "web_search_total_steps": max(1, n),
+                    "web_search_step_index": 1,
+                    "web_search_total_steps": 1,
                 },
             )
             return CompletionStreamPaused(
@@ -966,8 +962,6 @@ async def build_resume_web_search_payload(
             openai_user=snapshot.openai_user,
         )
         token_ws = resume_store.issue_token(snap_ws)
-        n = len(agents_out.search_queries)
-        step = agents_out.pending_search_index + 1
         await emit_progress(
             on_progress,
             {
@@ -976,8 +970,8 @@ async def build_resume_web_search_payload(
                 "proposed_search_query": agents_out.proposed_search_query,
                 "rationale": agents_out.rationale,
                 "pause_kind": "web_search",
-                "web_search_step_index": step,
-                "web_search_total_steps": max(1, n),
+                "web_search_step_index": 1,
+                "web_search_total_steps": 1,
             },
         )
         return CompletionStreamPaused(

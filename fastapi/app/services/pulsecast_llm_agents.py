@@ -1017,6 +1017,7 @@ async def _run_llm_agents_linear(
         if role == "WEB_CRAWLER" and _serper_configured(settings):
             queries = _web_search_queries_for_hitl(out, analyst_plan)
             queries = _filter_new_web_queries(ctx, queries)
+            queries = queries[:1]
             if out.needs_web_search and queries and host_plan is not None and analyst_plan is not None:
                 ds = discussion_state_from_legacy_prior(prior)
                 if ds is None:
@@ -1221,6 +1222,7 @@ async def _run_llm_agents_moderated_discussion(
             if _serper_configured(settings):
                 queries = _web_search_queries_for_hitl(wc_out, analyst_plan)
                 queries = _filter_new_web_queries(ctx, queries)
+                queries = queries[:1]
                 if (
                     wc_out.needs_web_search
                     and queries

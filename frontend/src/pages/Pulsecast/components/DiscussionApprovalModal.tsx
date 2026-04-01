@@ -30,16 +30,16 @@ export function DiscussionApprovalModal(props: DiscussionApprovalModalProps) {
   const title =
     stage === 'pre'
       ? requestedDepth === 'linear'
-        ? 'Start 1-round panel'
-        : 'Start multi-round panel'
-      : `Continue to round ${roundIndex} of ${maxRounds}`
+        ? 'Start Discussion'
+        : 'Start Panel Discussion'
+      : `Continue to Round ${roundIndex} of ${maxRounds}`
 
-  const body =
-    stage === 'pre'
-      ? requestedDepth === 'linear'
-        ? 'This will run a one-pass panel (Analyst, Marketing, Finance, Web Crawler, Challenger) before the Host final answer.'
-        : 'This will run a multi-round moderated panel discussion before the Host final answer.'
-      : 'Challenger recommends continuing the discussion to deepen or validate the analysis.'
+    const body =
+      stage === 'pre'
+        ? requestedDepth === 'linear'
+          ? 'Runs one round with all agents, then gives the final answer.'
+          : 'Runs a multi-round panel discussion before the final answer.'
+        : 'Continue the discussion to improve or validate the answer.';
 
   return (
     <div className={`interrupt-overlay${open ? ' show' : ''}`}>

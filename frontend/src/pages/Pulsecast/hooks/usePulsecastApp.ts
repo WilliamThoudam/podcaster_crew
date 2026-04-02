@@ -31,6 +31,7 @@ function newId(): string {
 const QA_INSIGHT_STYLE: Record<PodcastRole, { emoji: string; color: string }> = {
   HOST: { emoji: '🎤', color: 'var(--host)' },
   ANALYST: { emoji: '📊', color: 'var(--analyst)' },
+  AGGREGATION: { emoji: '🧰', color: 'var(--aggregation)' },
   MARKETING: { emoji: '📣', color: 'var(--marketing)' },
   FINANCE: { emoji: '💰', color: 'var(--finance)' },
   WEB_CRAWLER: { emoji: '🕸️', color: 'var(--web-crawler)' },
@@ -41,10 +42,11 @@ const QA_INSIGHT_STYLE: Record<PodcastRole, { emoji: string; color: string }> = 
 const ROLE_TO_AGENT_INDEX: Record<PodcastRole, number> = {
   HOST: 0,
   ANALYST: 1,
-  MARKETING: 2,
-  FINANCE: 3,
-  WEB_CRAWLER: 4,
-  CHALLENGER: 5,
+  AGGREGATION: 2,
+  MARKETING: 3,
+  FINANCE: 4,
+  WEB_CRAWLER: 5,
+  CHALLENGER: 6,
 }
 
 function agentStatesForThinkingRole(role: PodcastRole | null): AgentState[] {
@@ -154,7 +156,7 @@ function makePulsecastStreamHandlers(
     })
   }
   const upsertRoleMessage = (
-    role: 'MARKETING' | 'FINANCE' | 'WEB_CRAWLER' | 'CHALLENGER',
+    role: 'AGGREGATION' | 'MARKETING' | 'FINANCE' | 'WEB_CRAWLER' | 'CHALLENGER',
     id: string,
     text: string,
   ) => {
@@ -238,6 +240,49 @@ function makePulsecastStreamHandlers(
       return
     }
     if (event.type === 'sub_question_done') {
+      markThinking(null)
+      return
+    }
+    if (event.type === 'aggregation_started') {
+      markThinking('AGGREGATION')
+      if (!activeExecMsgId) {
+        // keep separate bubble from TTS/EXEC; reuse exec slot only when needed
+      }
+      return
+    }
+    if (event.type === 'rowcount_exceeded') {
+      markThinking('AGGREGATION')
+      const id = newId()
+      upsertRoleMessage(
+        'AGGREGATION',
+        id,
+        `Rowcount guard triggered for step ${event.index}/${event.total} (returned ${event.row_count} rows; threshold ${event.threshold}). Attempting aggregation rewrite…`,
+      )
+      return
+    }
+    if (event.type === 'query_rewritten') {
+      markThinking('AGGREGATION')
+      const id = newId()
+      upsertRoleMessage(
+        'AGGREGATION',
+        id,
+        `SQL was rewritten for step ${event.index}/${event.total} to keep results LLM-friendly.\n\nReason: ${event.reason || '(none provided)'}`,
+      )
+      return
+    }
+    if (event.type === 'aggregation_done') {
+      // Show a short bubble only when a rewrite actually happened.
+      if (event.was_rewritten || event.action === 'rewrite') {
+        const id = newId()
+        const conf =
+          event.confidence != null ? ` (confidence ${Math.round(event.confidence * 100)}%)` : ''
+        const stage = event.stage ? ` [${event.stage}]` : ''
+        upsertRoleMessage(
+          'AGGREGATION',
+          id,
+          `Aggregation Agent${stage}: ${event.action}${conf}.\n\n${event.reason ?? ''}`.trim(),
+        )
+      }
       markThinking(null)
       return
     }

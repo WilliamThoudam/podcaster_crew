@@ -65,6 +65,7 @@ export const TOTAL_MS = DURATIONS.reduce((a, b) => a + b, 0)
 export const AGENTS = [
   { name: 'Host', emoji: '🎤', color: 'var(--host)' },
   { name: 'Analyst', emoji: '📊', color: 'var(--analyst)' },
+  { name: 'Aggregation', emoji: '🧰', color: 'var(--aggregation)' },
   { name: 'Marketing', emoji: '📣', color: 'var(--marketing)' },
   { name: 'Finance', emoji: '💰', color: 'var(--finance)' },
   { name: 'Web Crawler', emoji: '🕸️', color: 'var(--web-crawler)' },

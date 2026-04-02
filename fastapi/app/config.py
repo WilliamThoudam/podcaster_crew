@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     default_user_db_id: int = 1
     default_db_type: str = "snowflake"
     default_schema_name: str = "dev"
-    default_model: str = "huggingface/deepseek-ai/DeepSeek-V3-0324"
+    default_model: str = "openai/gpt-4.1-mini-2025-04-14"
     default_max_nodes: str = "15"
 
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
@@ -42,6 +42,11 @@ class Settings(BaseSettings):
     web_search_summarize_enabled: bool = True
 
     pulsecast_discussion_max_rounds: int = 3
+
+    # Aggregation Agent (Query Strategist)
+    query_strategy_enabled: bool = True
+    query_strategy_row_threshold: int = 10000
+    query_strategy_confidence_threshold: float = 0.7
 
     # Planner caps (Text-to-SQL + Web crawler steps)
     pulsecast_max_plan_sql: int = 4

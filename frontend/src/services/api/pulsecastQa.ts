@@ -135,6 +135,28 @@ export type StreamProgressEvent =
   | { type: 'planned_sub_questions_done'; total: number }
   | { type: 'sub_question_start'; index: number; total: number; sub_question: string }
   | { type: 'sub_question_done'; index: number; total: number; sub_question: string }
+  | { type: 'aggregation_started'; index: number; total: number; sub_question: string; stage?: string }
+  | {
+      type: 'aggregation_done'
+      index: number
+      total: number
+      sub_question: string
+      stage?: string
+      action: 'pass_through' | 'rewrite' | 'skipped'
+      was_rewritten: boolean
+      sql_changed: boolean
+      confidence?: number | null
+      reason?: string | null
+    }
+  | { type: 'query_rewritten'; index: number; total: number; sub_question: string; reason: string }
+  | {
+      type: 'rowcount_exceeded'
+      index: number
+      total: number
+      sub_question: string
+      row_count: number
+      threshold: number
+    }
   | { type: 'tts_started'; index: number; total: number; sub_question: string }
   | { type: 'tts_label_chunk'; index: number; total: number; sub_question: string; chunk: string }
   | { type: 'tts_generating_chunk'; index: number; total: number; sub_question: string; chunk: string }

@@ -447,15 +447,17 @@ def _compact_sub_results(
     compact: list[dict[str, Any]] = []
     for sr in sub_results:
         rows = sr.execute.data or []
-        compact.append(
-            {
-                "sub_question": sr.sub_question,
-                "generated_sql": sr.generated_sql,
-                "rows_returned": len(rows),
-                "columns_in_data": list(rows[0].keys()) if rows else [],
-                "data_sample": _safe_sample(sr.execute, max_rows=max_rows_per_result),
-            }
-        )
+        entry: dict[str, Any] = {
+            "sub_question": sr.sub_question,
+            "generated_sql": sr.generated_sql,
+            "rows_returned": len(rows),
+            "columns_in_data": list(rows[0].keys()) if rows else [],
+            "data_sample": _safe_sample(sr.execute, max_rows=max_rows_per_result),
+        }
+        if sr.original_sql is not None:
+            entry["original_sql"] = sr.original_sql
+            entry["was_aggregated"] = True
+        compact.append(entry)
     return compact
 
 

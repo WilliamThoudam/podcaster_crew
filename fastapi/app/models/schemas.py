@@ -95,6 +95,7 @@ class SubResult(BaseModel):
 
     sub_question: str
     generated_sql: str
+    original_sql: str | None = None
     execute: ExecuteSqlResponse
 
 

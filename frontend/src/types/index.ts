@@ -16,6 +16,7 @@ export type AgentState = 'idle' | 'thinking' | 'active'
 export type PodcastRole =
   | 'HOST'
   | 'ANALYST'
+  | 'AGGREGATION'
   | 'MARKETING'
   | 'FINANCE'
   | 'WEB_CRAWLER'

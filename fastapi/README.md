@@ -19,6 +19,7 @@ Optional: copy or symlink the repo root `.env` here, or set variables in your en
 
 - `TEXT_TO_SQL_BASE_URL` (default `http://localhost:5001`)
 - `EXECUTE_SQL_URL` (default `http://localhost:3333/mcp/tools/execute_sql`)
+- `MERGE_BI_QUERY_URL` (default `http://15.206.14.199:5333/follow_up_classification`) — merges ordered user turns into one canonical question before Pulsecast planning
 - `OPENAI_BASE_URL` (required; e.g. `https://api.openai.com` or your compatible server)
 - `OPENAI_API_KEY` (required)
 - `OPENAI_MODEL` (required)

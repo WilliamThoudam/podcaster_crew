@@ -6,6 +6,7 @@ import httpx
 from fastapi import HTTPException, status
 
 from app.clients.execute_sql import execute_sql as execute_sql_client
+from app.clients.merge_bi_query import merge_conversational_bi_query
 from app.clients.text_to_sql import generate_sql
 from app.config import Settings
 from app.errors import UpstreamServiceError
@@ -50,14 +51,20 @@ from app.services.pulsecast_sse_emit import (
 from app.services.qa_pipeline import build_answer_summary, validate_and_normalize_sql
 
 
-def extract_last_user_question(req: OpenAIChatCompletionRequest) -> str:
-    for msg in reversed(req.messages):
-        if msg.role == "user" and msg.content.strip():
-            return msg.content.strip()
-    raise HTTPException(
-        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-        detail="messages must include at least one non-empty user message",
-    )
+def collect_user_queries(req: OpenAIChatCompletionRequest) -> list[str]:
+    """Ordered non-empty user turns (chronological), for follow-up merge before planning."""
+    out: list[str] = []
+    for msg in req.messages:
+        if msg.role == "user":
+            text = msg.content.strip()
+            if text:
+                out.append(text)
+    if not out:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="messages must include at least one non-empty user message",
+        )
+    return out
 
 
 def sub_question_tts_messages(*, sub_question: str) -> list[dict[str, str]]:
@@ -91,7 +98,20 @@ async def phase_planning(
     req: OpenAIChatCompletionRequest,
     on_progress: ProgressCallback | None,
 ) -> tuple[str, PlanningHostOutput, PlanningAnalystOutput]:
-    question = extract_last_user_question(req)
+    queries = collect_user_queries(req)
+    try:
+        question = await merge_conversational_bi_query(settings=settings, queries=queries)
+    except UpstreamServiceError as e:
+        is_4xx = e.upstream_status_code is not None and 400 <= e.upstream_status_code < 500
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY if is_4xx else status.HTTP_502_BAD_GATEWAY,
+            detail={
+                "service": e.service,
+                "message": e.message,
+                "upstream_status_code": e.upstream_status_code,
+                "upstream_body": e.upstream_body,
+            },
+        ) from e
     host_plan = await run_host_planner(settings=settings, question=question)
     await emit_progress(on_progress, {"type": "host_plan_started"})
     host_line = (host_plan.primary_focus or "").strip() or question

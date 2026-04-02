@@ -12,7 +12,8 @@ class Settings(BaseSettings):
 
     text_to_sql_base_url: str = "http://localhost:5001"
     execute_sql_url: str = "http://localhost:3333/mcp/tools/execute_sql"
-    
+    merge_bi_query_url: str = "http://15.206.14.199:5333/follow_up_classification"
+
     # text_to_sql_base_url: str = "https://fastapi.flashdice.dev.sntechlabs.com"
     # execute_sql_url: str = "https://mcp.flashdice.dev.sntechlabs.com/mcp/tools/execute_sql"
 

@@ -104,6 +104,7 @@ const COLOR_MAP: Record<string, string> = {
   'var(--analyst)': '123,97,255',
   'var(--marketing)': '255,107,53',
   'var(--finance)': '0,229,160',
+  'var(--forecaster)': '56,189,248',
   'var(--web-crawler)': '126,184,218',
   'var(--challenger)': '245,200,66',
   'var(--accent)': '0,212,255',

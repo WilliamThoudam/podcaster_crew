@@ -283,6 +283,7 @@ export function Pulsecast() {
                         ['Aggregation', 'var(--aggregation)', 'rgba(167,139,250,0.10)'],
                         ['Marketing', 'var(--marketing)', 'rgba(255,107,53,0.08)'],
                         ['Finance', 'var(--finance)', 'rgba(0,229,160,0.08)'],
+                        ['Forecaster', 'var(--forecaster)', 'rgba(56,189,248,0.10)'],
                         ['Web Crawler', 'var(--web-crawler)', 'rgba(126,184,218,0.12)'],
                         ['Challenger', 'var(--challenger)', 'rgba(245,200,66,0.08)'],
                       ].map(([name, col, bg]) => (

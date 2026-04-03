@@ -586,6 +586,7 @@ async def build_resume_discussion_payload(
             sub_results=list(snapshot.sub_results),
             host_plan=snapshot.host_plan,
             analyst_plan=snapshot.analyst_plan,
+            settings=settings,
         )
         if snapshot.requested_depth == "linear":
             from app.services.pulsecast_llm_agents import _run_llm_agents_linear
@@ -654,6 +655,7 @@ async def build_resume_discussion_payload(
             sub_results=list(snapshot.sub_results),
             host_plan=snapshot.host_plan,
             analyst_plan=snapshot.analyst_plan,
+            settings=settings,
         )
         agents_out = await _run_llm_agents_moderated_discussion(
             settings=settings,

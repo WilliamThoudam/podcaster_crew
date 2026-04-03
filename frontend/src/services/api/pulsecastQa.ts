@@ -8,6 +8,7 @@ export type PulsecastAgentId =
   | 'analyst'
   | 'marketing'
   | 'finance'
+  | 'forecaster'
   | 'web_crawler'
   | 'challenger'
 
@@ -19,7 +20,7 @@ export type AgentPipelineStep = {
 }
 
 export type AgentInsight = {
-  role: 'HOST' | 'ANALYST' | 'MARKETING' | 'FINANCE' | 'WEB_CRAWLER' | 'CHALLENGER'
+  role: 'HOST' | 'ANALYST' | 'MARKETING' | 'FINANCE' | 'FORECASTER' | 'WEB_CRAWLER' | 'CHALLENGER'
   text: string
 }
 
@@ -197,18 +198,18 @@ export type StreamProgressEvent =
   | { type: 'discussion_analyst_done' }
   | {
       type: 'discussion_turn_started'
-      role: 'MARKETING' | 'FINANCE' | 'WEB_CRAWLER' | 'CHALLENGER'
+      role: 'MARKETING' | 'FINANCE' | 'FORECASTER' | 'WEB_CRAWLER' | 'CHALLENGER'
       round: number
     }
   | {
       type: 'discussion_turn_chunk'
-      role: 'MARKETING' | 'FINANCE' | 'WEB_CRAWLER' | 'CHALLENGER'
+      role: 'MARKETING' | 'FINANCE' | 'FORECASTER' | 'WEB_CRAWLER' | 'CHALLENGER'
       round: number
       chunk: string
     }
   | {
       type: 'discussion_turn_done'
-      role: 'MARKETING' | 'FINANCE' | 'WEB_CRAWLER' | 'CHALLENGER'
+      role: 'MARKETING' | 'FINANCE' | 'FORECASTER' | 'WEB_CRAWLER' | 'CHALLENGER'
       round: number
     }
   | { type: 'discussion_moderator'; continue_discussion: boolean; reason: string }

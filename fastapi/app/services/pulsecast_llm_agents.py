@@ -442,6 +442,7 @@ def _safe_sample(exe: ExecuteSqlResponse, max_rows: int = 10, max_cell_len: int 
 
 def _compact_sub_results(
     sub_results: list[SubResult],
+    *,
     max_rows_per_result: int = 3,
 ) -> list[dict[str, Any]]:
     compact: list[dict[str, Any]] = []
@@ -470,18 +471,36 @@ def _context_blob_compact(
     sub_results: list[SubResult] | None = None,
     host_plan: PlanningHostOutput | None = None,
     analyst_plan: PlanningAnalystOutput | None = None,
+    settings: Settings | None = None,
 ) -> dict[str, Any]:
+    primary_max = (
+        settings.pulsecast_context_sample_max_rows if settings is not None else 10
+    )
+    sub_max = (
+        settings.pulsecast_sub_result_sample_max_rows if settings is not None else 3
+    )
     primary = exe.data or []
     base: dict[str, Any] = {
         "question": question,
         "generated_sql": generated_sql,
         "rows_returned": len(primary),
         "columns_in_data": list(primary[0].keys()) if primary else [],
-        "data_sample": _safe_sample(exe),
+        "data_sample": _safe_sample(exe, max_rows=primary_max),
         "deterministic_summary": deterministic_summary,
+        "context_sample_meta": {
+            "primary_max_rows": primary_max,
+            "sub_result_max_rows_per_step": sub_max,
+            "note": (
+                "data_sample is truncated to primary_max_rows rows; rows_returned is the full "
+                "result set size. Use rows_returned and sub_results[].rows_returned when judging coverage."
+            ),
+        },
     }
     if sub_results:
-        base["sub_results"] = _compact_sub_results(sub_results)
+        base["sub_results"] = _compact_sub_results(
+            sub_results,
+            max_rows_per_result=sub_max,
+        )
         base["sub_result_quality_hints"] = sub_result_quality_hints(sub_results)
     if host_plan:
         base["host_plan"] = {
@@ -1343,6 +1362,7 @@ async def run_llm_agents(
         sub_results=sr_list,
         host_plan=host_plan,
         analyst_plan=analyst_plan,
+        settings=settings,
     )
     if completed_web_results:
         _merge_completed_web_into_ctx(ctx, [dict(x) for x in completed_web_results])
@@ -1443,6 +1463,7 @@ async def run_llm_agents_minimal_only(
         sub_results=list(sub_results),
         host_plan=host_plan,
         analyst_plan=analyst_plan,
+        settings=settings,
     )
     if completed_web_results:
         _merge_completed_web_into_ctx(ctx, [dict(x) for x in completed_web_results])
@@ -1479,6 +1500,7 @@ async def run_llm_agents_host_only(
         sub_results=sub_results,
         host_plan=host_plan,
         analyst_plan=analyst_plan,
+        settings=settings,
     )
     if user_declined_extra_sql:
         ctx["user_declined_extra_sql"] = True
@@ -1549,6 +1571,7 @@ async def run_llm_agents_after_web_hitl(
         sub_results=sub_results,
         host_plan=host_plan,
         analyst_plan=analyst_plan,
+        settings=settings,
     )
     completed = [dict(x) for x in completed_web_results]
 

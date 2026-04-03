@@ -34,6 +34,7 @@ const QA_INSIGHT_STYLE: Record<PodcastRole, { emoji: string; color: string }> = 
   AGGREGATION: { emoji: '🧰', color: 'var(--aggregation)' },
   MARKETING: { emoji: '📣', color: 'var(--marketing)' },
   FINANCE: { emoji: '💰', color: 'var(--finance)' },
+  FORECASTER: { emoji: '📈', color: 'var(--forecaster)' },
   WEB_CRAWLER: { emoji: '🕸️', color: 'var(--web-crawler)' },
   CHALLENGER: { emoji: '⚖️', color: 'var(--challenger)' },
 }
@@ -45,8 +46,9 @@ const ROLE_TO_AGENT_INDEX: Record<PodcastRole, number> = {
   AGGREGATION: 2,
   MARKETING: 3,
   FINANCE: 4,
-  WEB_CRAWLER: 5,
-  CHALLENGER: 6,
+  FORECASTER: 5,
+  WEB_CRAWLER: 6,
+  CHALLENGER: 7,
 }
 
 function agentStatesForThinkingRole(role: PodcastRole | null): AgentState[] {
@@ -104,7 +106,13 @@ function makePulsecastStreamHandlers(
   let discussionAnalystText = ''
   let discussionTurnMsgId: string | null = null
   let discussionTurnText = ''
-  let discussionTurnRole: 'MARKETING' | 'FINANCE' | 'WEB_CRAWLER' | 'CHALLENGER' | null = null
+  let discussionTurnRole:
+    | 'MARKETING'
+    | 'FINANCE'
+    | 'FORECASTER'
+    | 'WEB_CRAWLER'
+    | 'CHALLENGER'
+    | null = null
   const upsertAnalystMessage = (id: string, text: string) => {
     setQaMessages((m) => {
       const exists = m.some((msg) => msg.id === id)
@@ -158,7 +166,7 @@ function makePulsecastStreamHandlers(
     })
   }
   const upsertRoleMessage = (
-    role: 'AGGREGATION' | 'MARKETING' | 'FINANCE' | 'WEB_CRAWLER' | 'CHALLENGER',
+    role: 'AGGREGATION' | 'MARKETING' | 'FINANCE' | 'FORECASTER' | 'WEB_CRAWLER' | 'CHALLENGER',
     id: string,
     text: string,
   ) => {
@@ -777,7 +785,9 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
             ? 1.05
             : seg.role === 'FINANCE'
               ? 0.85
-              : 1.0
+              : seg.role === 'FORECASTER'
+                ? 0.95
+                : 1.0
     synth.speak(u)
     return () => synth.cancel()
   }, [currentSegment, isPlaying])

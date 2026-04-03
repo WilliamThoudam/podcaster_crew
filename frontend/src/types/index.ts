@@ -19,6 +19,7 @@ export type PodcastRole =
   | 'AGGREGATION'
   | 'MARKETING'
   | 'FINANCE'
+  | 'FORECASTER'
   | 'WEB_CRAWLER'
   | 'CHALLENGER'
 

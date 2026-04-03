@@ -39,8 +39,8 @@ export function DiscussionApprovalModal(props: DiscussionApprovalModalProps) {
   const body =
     stage === 'pre'
       ? requestedDepth === 'linear'
-        ? 'This will run a discussion (Analyst, Marketing, Finance, Web Crawler, Challenger) before the Host final answer.'
-        : 'This will run a panel discussion (Analyst, Marketing, Finance, Web Crawler, Challenger) that may continue for multiple rounds before the Host final answer.'
+        ? 'This will run a discussion (Analyst, Marketing, Finance, Forecaster, Web Crawler, Challenger) before the Host final answer.'
+        : 'This will run a panel discussion (Analyst, Marketing, Finance, Forecaster, Web Crawler, Challenger) that may continue for multiple rounds before the Host final answer.'
       : 'Challenger recommends continuing the discussion to deepen or validate the analysis.'
 
   return (

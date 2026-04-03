@@ -43,6 +43,10 @@ class Settings(BaseSettings):
 
     pulsecast_discussion_max_rounds: int = 3
 
+    # LLM context: how many SQL result rows each agent sees (full execution still returns all rows)
+    pulsecast_context_sample_max_rows: int = 40
+    pulsecast_sub_result_sample_max_rows: int = 20
+
     # Aggregation Agent (Query Strategist)
     query_strategy_enabled: bool = True
     query_strategy_row_threshold: int = 10000

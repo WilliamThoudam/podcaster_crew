@@ -13,6 +13,7 @@ From this directory:
 python -m venv .venv
 .venv\Scripts\activate   # Windows
 pip install -e .
+pip install -e ".[dev]"   # optional: pytest for `pytest` in `tests/`
 ```
 
 Optional: copy or symlink the repo root `.env` here, or set variables in your environment. Supported settings (see `app/config.py`):
@@ -52,6 +53,7 @@ This repo pins **`uvicorn[standard]>=0.41.0`** so you get fixes such as [lifespa
 - Health: `GET http://localhost:8000/health`
 - Models: `GET http://localhost:8000/v1/models`
 - Chat Completions: `POST http://localhost:8000/v1/chat/completions`
+- **Session refine** (`POST /v1/chat/completions/refine`): follow-up turn on an existing in-memory **Pulsecast session**. The client sends the same `session_id` it uses as OpenAI `user` on the initial `POST /v1/chat/completions`. The server merges `refinement` with prior turns (`MERGE_BI_QUERY_URL`), re-runs host/analyst planning, **reuses executed sub-questions** when the new plan’s sub-question list matches a prefix of the stored `SubResult`s (exact string match per index), then continues with web HITL (re-run from the new plan) and agents. If no session exists, returns **404** (the frontend falls back to a full completion). Sessions are **in-memory** with TTL `pulsecast_session_ttl_seconds` (default 30 minutes; see `app/config.py`). Use a **single Uvicorn worker** until session state is moved to Redis (same constraint as stream pause).
 
 Frontend: set `VITE_PULSECAST_API_URL=http://localhost:8000` in `frontend/.env`.
 

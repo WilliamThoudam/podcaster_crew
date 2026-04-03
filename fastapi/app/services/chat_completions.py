@@ -15,20 +15,31 @@ from app.clients.text_to_sql import generate_sql
 from app.config import Settings
 from app.graph.pulsecast_graph import run_pulsecast_completion_graph
 from app.models.schemas import (
+    ExecuteSqlResponse,
     OpenAIChatCompletionChunk,
     OpenAIChatCompletionChunkChoice,
     OpenAIChatCompletionDelta,
     OpenAIChatCompletionRequest,
     OpenAIChatMessage,
+    PlanningAnalystOutput,
+    PlanningHostOutput,
+    PulsecastChatRefineRequest,
     PulsecastChatResumeRequest,
     SubResult,
     TextToSqlResponse,
 )
 from app.services.pulsecast_completion_steps import (
     phase_agents_finalize,
+    phase_planning,
+    phase_web_search_hitl,
     run_sub_questions_slice,
     sub_question_tts_messages,
     to_markdown_table,
+)
+from app.services.pulsecast_session_store import (
+    PulsecastSession,
+    pulsecast_session_store,
+    sub_question_prefix_reuse_count,
 )
 from app.services.pulsecast_completion_types import (
     CompletionStreamComplete,
@@ -75,7 +86,9 @@ __all__ = [
     "build_resume_duplicate_sub_question_payload",
     "build_resume_payload",
     "stream_completion_sse",
+    "stream_refine_sse",
     "stream_resume_sse",
+    "build_refine_payload",
 ]
 
 def _extract_upstream_error_text(detail: Any) -> str | None:
@@ -161,6 +174,212 @@ async def build_completion_payload(
     )
 
 
+async def build_refine_payload(
+    *,
+    settings: Settings,
+    body: PulsecastChatRefineRequest,
+    on_progress: ProgressCallback | None = None,
+) -> CompletionStreamOutcome:
+    sid = body.session_id.strip()
+    stored = await pulsecast_session_store.get(sid)
+    if stored is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=(
+                "No active Pulsecast session for this session_id; "
+                "send an initial question via POST /v1/chat/completions with stream=true "
+                "and user=session_id first."
+            ),
+        )
+
+    async def persist(session: PulsecastSession) -> None:
+        await pulsecast_session_store.save(session)
+
+    turns = list(stored.raw_user_turns)
+    turns.append(body.refinement.strip())
+    session = stored.model_copy(update={"raw_user_turns": turns})
+    await persist(session)
+
+    req = OpenAIChatCompletionRequest(
+        model=body.model,
+        stream=True,
+        messages=[OpenAIChatMessage(role="user", content=t) for t in session.raw_user_turns],
+        user=sid,
+    )
+
+    q, host_plan, analyst_plan = await phase_planning(
+        settings=settings,
+        req=req,
+        on_progress=on_progress,
+    )
+    await persist(
+        session.model_copy(
+            update={
+                "canonical_question": q,
+                "host_plan": host_plan,
+                "analyst_plan": analyst_plan,
+                "completed_phase": "after_planning",
+            }
+        )
+    )
+
+    k = sub_question_prefix_reuse_count(session.sub_results, analyst_plan.sub_questions)
+    reused = list(session.sub_results[:k])
+    primary_sql = reused[0].generated_sql if k > 0 else None
+    primary_exe = reused[0].execute if k > 0 else None
+
+    sub_out = await run_sub_questions_slice(
+        settings=settings,
+        req=req,
+        question=q,
+        host_plan=host_plan,
+        analyst_plan=analyst_plan,
+        on_progress=on_progress,
+        start_index=k,
+        sub_results=reused,
+        primary_sql=primary_sql,
+        primary_exe=primary_exe,
+        first_sub_question_override=None,
+        duplicate_fail_index=None,
+        persist_session=persist,
+        session_id=sid,
+    )
+    if isinstance(sub_out, CompletionStreamPaused):
+        return sub_out
+    sub_results, primary_sql, primary_exe = sub_out
+
+    web_out = await phase_web_search_hitl(
+        settings=settings,
+        req=req,
+        question=q,
+        host_plan=host_plan,
+        analyst_plan=analyst_plan,
+        primary_sql=primary_sql,
+        primary_exe=primary_exe,
+        sub_results=sub_results,
+        on_progress=on_progress,
+    )
+    if isinstance(web_out, CompletionStreamPaused):
+        return web_out
+    completed_web_results, user_declined_web_search = web_out
+
+    prev_web = await pulsecast_session_store.get(sid)
+    if prev_web is not None:
+        await persist(
+            prev_web.model_copy(
+                update={
+                    "completed_web_results": list(completed_web_results),
+                    "user_declined_web_search": bool(user_declined_web_search),
+                    "completed_phase": "after_web",
+                }
+            )
+        )
+
+    agents_out = await phase_agents_finalize(
+        settings=settings,
+        req=req,
+        question=q,
+        host_plan=host_plan,
+        analyst_plan=analyst_plan,
+        primary_sql=primary_sql,
+        primary_exe=primary_exe,
+        sub_results=sub_results,
+        completed_web_results=completed_web_results,
+        user_declined_web_search=user_declined_web_search,
+        on_progress=on_progress,
+    )
+    if isinstance(agents_out, CompletionStreamComplete):
+        prev_done = await pulsecast_session_store.get(sid)
+        if prev_done is not None:
+            await persist(prev_done.model_copy(update={"completed_phase": "after_agents"}))
+    return agents_out
+
+
+async def _sync_pulsecast_session_after_hitl_answer(
+    *,
+    openai_user: str | None,
+    question: str,
+    host_plan: PlanningHostOutput,
+    analyst_plan: PlanningAnalystOutput,
+    sub_results: list[SubResult],
+    primary_sql: str,
+    primary_exe: ExecuteSqlResponse,
+    completed_web_results: list[dict[str, Any]] | None = None,
+    user_declined_web_search: bool | None = None,
+) -> None:
+    """Merge terminal HITL resume outcome into the Pulsecast session for subsequent /refine."""
+    sid = (openai_user or "").strip()
+    if not sid:
+        return
+    prev = await pulsecast_session_store.get(sid)
+    raw_turns = list(prev.raw_user_turns) if prev is not None else []
+    updates: dict[str, Any] = {
+        "canonical_question": question,
+        "host_plan": host_plan,
+        "analyst_plan": analyst_plan,
+        "sub_results": list(sub_results),
+        "primary_sql": primary_sql,
+        "primary_exe": primary_exe,
+        "completed_phase": "after_agents",
+        "raw_user_turns": raw_turns,
+    }
+    if completed_web_results is not None:
+        updates["completed_web_results"] = list(completed_web_results)
+    elif prev is not None:
+        updates["completed_web_results"] = list(prev.completed_web_results)
+    if user_declined_web_search is not None:
+        updates["user_declined_web_search"] = bool(user_declined_web_search)
+    elif prev is not None:
+        updates["user_declined_web_search"] = prev.user_declined_web_search
+    if prev is not None:
+        await pulsecast_session_store.save(prev.model_copy(update=updates))
+    else:
+        await pulsecast_session_store.save(PulsecastSession(session_id=sid, **updates))
+
+
+async def _phase_agents_finalize_maybe_sync_session(
+    *,
+    settings: Settings,
+    req: OpenAIChatCompletionRequest,
+    question: str,
+    host_plan: PlanningHostOutput,
+    analyst_plan: PlanningAnalystOutput,
+    primary_sql: str,
+    primary_exe: ExecuteSqlResponse,
+    sub_results: list[SubResult],
+    openai_user: str | None,
+    on_progress: ProgressCallback | None,
+    completed_web_results: list[dict[str, Any]] | None = None,
+    user_declined_web_search: bool = False,
+) -> CompletionStreamOutcome:
+    out = await phase_agents_finalize(
+        settings=settings,
+        req=req,
+        question=question,
+        host_plan=host_plan,
+        analyst_plan=analyst_plan,
+        primary_sql=primary_sql,
+        primary_exe=primary_exe,
+        sub_results=sub_results,
+        completed_web_results=completed_web_results,
+        user_declined_web_search=user_declined_web_search,
+        on_progress=on_progress,
+    )
+    if isinstance(out, CompletionStreamComplete):
+        await _sync_pulsecast_session_after_hitl_answer(
+            openai_user=openai_user,
+            question=question,
+            host_plan=host_plan,
+            analyst_plan=analyst_plan,
+            sub_results=sub_results,
+            primary_sql=primary_sql,
+            primary_exe=primary_exe,
+            completed_web_results=list(completed_web_results) if completed_web_results is not None else None,
+            user_declined_web_search=user_declined_web_search,
+        )
+    return out
+
+
 async def build_resume_payload(
     *,
     settings: Settings,
@@ -192,6 +411,15 @@ async def build_resume_payload(
             discussion=snapshot.discussion,
             pipeline=snapshot.pipeline,
             user_declined_extra_sql=True,
+        )
+        await _sync_pulsecast_session_after_hitl_answer(
+            openai_user=snapshot.openai_user,
+            question=snapshot.question,
+            host_plan=snapshot.host_plan,
+            analyst_plan=snapshot.analyst_plan,
+            sub_results=sub_results,
+            primary_sql=snapshot.generated_sql,
+            primary_exe=snapshot.primary_exe,
         )
         return CompletionStreamComplete(content=agents_done.answer)
 
@@ -422,6 +650,15 @@ async def build_resume_payload(
         pipeline=snapshot.pipeline,
         user_declined_extra_sql=False,
     )
+    await _sync_pulsecast_session_after_hitl_answer(
+        openai_user=snapshot.openai_user,
+        question=snapshot.question,
+        host_plan=snapshot.host_plan,
+        analyst_plan=snapshot.analyst_plan,
+        sub_results=sub_results,
+        primary_sql=snapshot.generated_sql,
+        primary_exe=snapshot.primary_exe,
+    )
     return CompletionStreamComplete(content=agents_done.answer)
 
 
@@ -431,10 +668,25 @@ async def _pause_from_discussion_agents_out(
     agents_out: Any,
     openai_user: str | None,
     on_progress: ProgressCallback | None,
+    question: str,
+    host_plan: PlanningHostOutput,
+    analyst_plan: PlanningAnalystOutput,
+    sub_results: list[SubResult],
+    primary_sql: str,
+    primary_exe: ExecuteSqlResponse,
 ) -> CompletionStreamOutcome:
     from app.services.pulsecast_llm_agents import LlmAgentsComplete, LlmAgentsPausedDiscussion
 
     if isinstance(agents_out, LlmAgentsComplete):
+        await _sync_pulsecast_session_after_hitl_answer(
+            openai_user=openai_user,
+            question=question,
+            host_plan=host_plan,
+            analyst_plan=analyst_plan,
+            sub_results=sub_results,
+            primary_sql=primary_sql,
+            primary_exe=primary_exe,
+        )
         return CompletionStreamComplete(content=agents_out.answer)
 
     if isinstance(agents_out, LlmAgentsPausedWebSearch):
@@ -572,6 +824,15 @@ async def build_resume_discussion_payload(
             user_declined_web_search=False,
             on_progress=on_progress,
         )
+        await _sync_pulsecast_session_after_hitl_answer(
+            openai_user=snapshot.openai_user,
+            question=snapshot.question,
+            host_plan=snapshot.host_plan,
+            analyst_plan=snapshot.analyst_plan,
+            sub_results=list(snapshot.sub_results),
+            primary_sql=snapshot.generated_sql,
+            primary_exe=snapshot.primary_exe,
+        )
         return CompletionStreamComplete(content=agents_done.answer)
 
     # Approve starting discussion (linear or moderated)
@@ -625,6 +886,12 @@ async def build_resume_discussion_payload(
             agents_out=agents_out,
             openai_user=snapshot.openai_user,
             on_progress=on_progress,
+            question=snapshot.question,
+            host_plan=snapshot.host_plan,
+            analyst_plan=snapshot.analyst_plan,
+            sub_results=list(snapshot.sub_results),
+            primary_sql=snapshot.generated_sql,
+            primary_exe=snapshot.primary_exe,
         )
 
     # Between rounds: approved -> continue moderated; declined -> HOST finalize from transcript so far
@@ -641,6 +908,15 @@ async def build_resume_discussion_payload(
             discussion=snapshot.discussion,  # type: ignore[arg-type]
             pipeline=snapshot.pipeline or [],
             user_declined_extra_sql=False,
+        )
+        await _sync_pulsecast_session_after_hitl_answer(
+            openai_user=snapshot.openai_user,
+            question=snapshot.question,
+            host_plan=snapshot.host_plan,
+            analyst_plan=snapshot.analyst_plan,
+            sub_results=list(snapshot.sub_results),
+            primary_sql=snapshot.generated_sql,
+            primary_exe=snapshot.primary_exe,
         )
         return CompletionStreamComplete(content=agents_done.answer)
 
@@ -680,6 +956,12 @@ async def build_resume_discussion_payload(
             agents_out=agents_out,
             openai_user=snapshot.openai_user,
             on_progress=on_progress,
+            question=snapshot.question,
+            host_plan=snapshot.host_plan,
+            analyst_plan=snapshot.analyst_plan,
+            sub_results=list(snapshot.sub_results),
+            primary_sql=snapshot.generated_sql,
+            primary_exe=snapshot.primary_exe,
         )
 
     # Should not happen
@@ -695,6 +977,15 @@ async def build_resume_discussion_payload(
         discussion=snapshot.discussion,  # type: ignore[arg-type]
         pipeline=snapshot.pipeline or [],
         user_declined_extra_sql=False,
+    )
+    await _sync_pulsecast_session_after_hitl_answer(
+        openai_user=snapshot.openai_user,
+        question=snapshot.question,
+        host_plan=snapshot.host_plan,
+        analyst_plan=snapshot.analyst_plan,
+        sub_results=list(snapshot.sub_results),
+        primary_sql=snapshot.generated_sql,
+        primary_exe=snapshot.primary_exe,
     )
     return CompletionStreamComplete(content=agents_done.answer)
 
@@ -737,7 +1028,7 @@ async def build_resume_duplicate_sub_question_payload(
         if isinstance(sub_out, CompletionStreamPaused):
             return sub_out
         sub_results, primary_sql, primary_exe = sub_out
-        return await phase_agents_finalize(
+        return await _phase_agents_finalize_maybe_sync_session(
             settings=settings,
             req=openai_req,
             question=snapshot.question,
@@ -746,6 +1037,7 @@ async def build_resume_duplicate_sub_question_payload(
             primary_sql=primary_sql,
             primary_exe=primary_exe,
             sub_results=sub_results,
+            openai_user=snapshot.openai_user,
             on_progress=on_progress,
         )
 
@@ -777,7 +1069,7 @@ async def build_resume_duplicate_sub_question_payload(
     if isinstance(sub_out, CompletionStreamPaused):
         return sub_out
     sub_results, primary_sql, primary_exe = sub_out
-    return await phase_agents_finalize(
+    return await _phase_agents_finalize_maybe_sync_session(
         settings=settings,
         req=openai_req,
         question=snapshot.question,
@@ -786,6 +1078,7 @@ async def build_resume_duplicate_sub_question_payload(
         primary_sql=primary_sql,
         primary_exe=primary_exe,
         sub_results=sub_results,
+        openai_user=snapshot.openai_user,
         on_progress=on_progress,
     )
 
@@ -832,7 +1125,7 @@ async def build_resume_web_search_payload(
                 context_question=snapshot.question,
                 organic_for_takeaways=None,
             )
-            return await phase_agents_finalize(
+            return await _phase_agents_finalize_maybe_sync_session(
                 settings=settings,
                 req=openai_req,
                 question=snapshot.question,
@@ -841,9 +1134,10 @@ async def build_resume_web_search_payload(
                 primary_sql=snapshot.generated_sql,
                 primary_exe=snapshot.primary_exe,
                 sub_results=list(snapshot.sub_results),
+                openai_user=snapshot.openai_user,
+                on_progress=on_progress,
                 completed_web_results=completed,
                 user_declined_web_search=True,
-                on_progress=on_progress,
             )
 
         q = (edited_question or "").strip() or (queries[idx] if queries else "").strip()
@@ -920,7 +1214,7 @@ async def build_resume_web_search_payload(
                 rationale=snap_ws.rationale,
             )
 
-        return await phase_agents_finalize(
+        return await _phase_agents_finalize_maybe_sync_session(
             settings=settings,
             req=openai_req,
             question=snapshot.question,
@@ -929,9 +1223,10 @@ async def build_resume_web_search_payload(
             primary_sql=snapshot.generated_sql,
             primary_exe=snapshot.primary_exe,
             sub_results=list(snapshot.sub_results),
+            openai_user=snapshot.openai_user,
+            on_progress=on_progress,
             completed_web_results=completed,
             user_declined_web_search=False,
-            on_progress=on_progress,
         )
 
     # Existing path: mid-discussion web-search (WEB_CRAWLER requested it).
@@ -1035,6 +1330,17 @@ async def build_resume_web_search_payload(
         delay_s=STREAM_DELAY_S,
     )
     await emit_progress(on_progress, {"type": "summarizing_done"})
+    await _sync_pulsecast_session_after_hitl_answer(
+        openai_user=snapshot.openai_user,
+        question=snapshot.question,
+        host_plan=snapshot.host_plan,
+        analyst_plan=snapshot.analyst_plan,
+        sub_results=list(snapshot.sub_results),
+        primary_sql=snapshot.generated_sql,
+        primary_exe=snapshot.primary_exe,
+        completed_web_results=list(snapshot.completed_web_results),
+        user_declined_web_search=False,
+    )
     return CompletionStreamComplete(content=agents_out.answer)
 
 
@@ -1247,6 +1553,152 @@ async def stream_completion_sse(
 
     task = asyncio.create_task(
         build_completion_payload(settings=settings, req=req, on_progress=on_progress)
+    )
+
+    try:
+        while True:
+            if task.done() and progress_q.empty():
+                break
+            try:
+                marker = await asyncio.wait_for(progress_q.get(), timeout=0.1)
+            except TimeoutError:
+                continue
+            if not started:
+                started = True
+                async for line in _gated_yields(
+                    job_id,
+                    f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), role='assistant')}\n\n",
+                ):
+                    yield line
+            async for line in _gated_yields(
+                job_id,
+                f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), content=marker)}\n\n",
+            ):
+                yield line
+
+        try:
+            outcome = await task
+        except HTTPException as e:
+            if not started:
+                started = True
+                async for line in _gated_yields(
+                    job_id,
+                    f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), role='assistant')}\n\n",
+                ):
+                    yield line
+
+            plain = _extract_upstream_error_text(e.detail) or (
+                str(e.detail) if e.detail is not None else str(e)
+            )
+            async for line in _drain_gated_yields(job_id):
+                yield line
+            async for line in _gated_yields(
+                job_id,
+                f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), content=plain)}\n\n",
+            ):
+                yield line
+            async for line in _gated_yields(
+                job_id,
+                f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), finish_reason='stop')}\n\n",
+            ):
+                yield line
+            async for line in _gated_yields(job_id, "data: [DONE]\n\n"):
+                yield line
+            return
+        except Exception as e:
+            if not started:
+                raise
+            error_text = f"Failed to generate response: {e}"
+            async for line in _drain_gated_yields(job_id):
+                yield line
+            async for line in _gated_yields(
+                job_id,
+                f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), content=error_text)}\n\n",
+            ):
+                yield line
+            async for line in _gated_yields(
+                job_id,
+                f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), finish_reason='stop')}\n\n",
+            ):
+                yield line
+            async for line in _gated_yields(job_id, "data: [DONE]\n\n"):
+                yield line
+            return
+
+        if isinstance(outcome, CompletionStreamPaused):
+            if not started:
+                started = True
+                async for line in _gated_yields(
+                    job_id,
+                    f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), role='assistant')}\n\n",
+                ):
+                    yield line
+            async for line in _drain_gated_yields(job_id):
+                yield line
+            async for line in _gated_yields(
+                job_id,
+                f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), finish_reason='stop')}\n\n",
+            ):
+                yield line
+            async for line in _gated_yields(job_id, "data: [DONE]\n\n"):
+                yield line
+            return
+
+        if not started:
+            started = True
+            async for line in _gated_yields(
+                job_id,
+                f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), role='assistant')}\n\n",
+            ):
+                yield line
+
+        content = outcome.content
+        for i in range(0, len(content), STREAM_CHUNK_SIZE):
+            part = content[i : i + STREAM_CHUNK_SIZE]
+            async for line in _gated_yields(
+                job_id,
+                f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), content=part)}\n\n",
+            ):
+                yield line
+            await asyncio.sleep(STREAM_DELAY_S)
+
+        async for line in _drain_gated_yields(job_id):
+            yield line
+        async for line in _gated_yields(
+            job_id,
+            f"data: {_chunk_json(completion_id=completion_id, model=req.model, now=int(time.time()), finish_reason='stop')}\n\n",
+        ):
+            yield line
+        async for line in _gated_yields(job_id, "data: [DONE]\n\n"):
+            yield line
+    except asyncio.CancelledError:
+        raise
+    finally:
+        if task is not None and not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        await stream_pause_store.unregister(job_id)
+
+
+async def stream_refine_sse(
+    *,
+    settings: Settings,
+    req: PulsecastChatRefineRequest,
+    job_id: str,
+) -> AsyncIterator[str]:
+    await stream_pause_store.register(job_id, req.session_id)
+    completion_id = f"chatcmpl_{uuid.uuid4().hex}"
+    progress_q: asyncio.Queue[str] = asyncio.Queue()
+    started = False
+    task: asyncio.Task[CompletionStreamOutcome] | None = None
+
+    async def on_progress(event: dict[str, Any]) -> None:
+        marker = f"<<PULSECAST_PROGRESS:{json.dumps(event, ensure_ascii=False)}>>"
+        await progress_q.put(marker)
+
+    task = asyncio.create_task(
+        build_refine_payload(settings=settings, body=req, on_progress=on_progress)
     )
 
     try:

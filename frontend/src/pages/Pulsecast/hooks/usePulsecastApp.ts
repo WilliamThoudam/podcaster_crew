@@ -12,6 +12,7 @@ import {
 import {
   pulsecastStreamControl,
   streamPulsecastQa,
+  streamPulsecastRefine,
   streamPulsecastResume,
   type SqlHitlPauseKind,
 } from '../../../services/api/pulsecastQa'
@@ -862,24 +863,56 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
             .map((m) => ({ role: 'user' as const, content: m.text })),
           { role: 'user' as const, content: q },
         ]
-        const result = await streamPulsecastQa(
-          {
-            question: q,
-            session_id: qaSessionRef.current,
-            messages: conversation,
+        const priorUserTurns = qaMessages.filter(
+          (m) => m.kind === 'user' && m.role === 'YOU' && typeof m.text === 'string',
+        ).length
+        const streamOpts = {
+          signal: ac.signal,
+          onStreamJobId: (id: string) => {
+            streamJobIdRef.current = id
+            setStreamJobId(id)
           },
-          {
-            onDelta: stream.onDelta,
-            onProgress: stream.onProgress,
-          },
-          {
-            signal: ac.signal,
-            onStreamJobId: (id) => {
-              streamJobIdRef.current = id
-              setStreamJobId(id)
+        }
+        const streamCallbacks = {
+          onDelta: stream.onDelta,
+          onProgress: stream.onProgress,
+        }
+        let result: Awaited<ReturnType<typeof streamPulsecastQa>>
+        if (priorUserTurns >= 1 && qaSessionRef.current) {
+          try {
+            result = await streamPulsecastRefine(
+              { session_id: qaSessionRef.current, refinement: q },
+              streamCallbacks,
+              streamOpts,
+            )
+          } catch (refineErr) {
+            const refineMsg = refineErr instanceof Error ? refineErr.message : String(refineErr)
+            const noSession =
+              refineMsg.includes('No active Pulsecast session') ||
+              refineMsg.includes('404') ||
+              refineMsg.toLowerCase().includes('not found')
+            if (!noSession) throw refineErr
+            result = await streamPulsecastQa(
+              {
+                question: q,
+                session_id: qaSessionRef.current,
+                messages: conversation,
+              },
+              streamCallbacks,
+              streamOpts,
+            )
+          }
+        } else {
+          result = await streamPulsecastQa(
+            {
+              question: q,
+              session_id: qaSessionRef.current,
+              messages: conversation,
             },
-          },
-        )
+            streamCallbacks,
+            streamOpts,
+          )
+        }
         setAgentStates(AGENTS.map(() => 'idle'))
         if (result.kind === 'aborted') {
           if (stream?.getTypingBubbleCreated()) {

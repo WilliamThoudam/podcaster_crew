@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
@@ -48,6 +49,7 @@ from app.services.pulsecast_sse_emit import (
     emit_progress,
     emit_text_chunks,
 )
+from app.services.pulsecast_session_store import PulsecastSession, pulsecast_session_store
 from app.services.qa_pipeline import build_answer_summary, validate_and_normalize_sql
 from app.services.query_strategist import (
     QueryStrategyResult,
@@ -70,6 +72,45 @@ def collect_user_queries(req: OpenAIChatCompletionRequest) -> list[str]:
             detail="messages must include at least one non-empty user message",
         )
     return out
+
+
+PersistPulsecastSession = Callable[[PulsecastSession], Awaitable[None]]
+
+
+async def _maybe_persist_sub_question_progress(
+    *,
+    persist_session: PersistPulsecastSession | None,
+    session_id: str | None,
+    req: OpenAIChatCompletionRequest,
+    question: str,
+    host_plan: PlanningHostOutput,
+    analyst_plan: PlanningAnalystOutput,
+    sub_results: list[SubResult],
+    primary_sql: str | None,
+    primary_exe: ExecuteSqlResponse | None,
+) -> None:
+    if persist_session is None or not (session_id or "").strip():
+        return
+    sid = session_id.strip()
+    prev = await pulsecast_session_store.get(sid)
+    raw_turns = prev.raw_user_turns if prev is not None else collect_user_queries(req)
+    extra: dict[str, Any] = {}
+    if prev is not None:
+        extra["completed_web_results"] = list(prev.completed_web_results)
+        extra["user_declined_web_search"] = prev.user_declined_web_search
+    session = PulsecastSession(
+        session_id=sid,
+        raw_user_turns=raw_turns,
+        canonical_question=question,
+        host_plan=host_plan,
+        analyst_plan=analyst_plan,
+        sub_results=list(sub_results),
+        primary_sql=primary_sql,
+        primary_exe=primary_exe,
+        completed_phase="after_sub_questions",
+        **extra,
+    )
+    await persist_session(session)
 
 
 def sub_question_tts_messages(*, sub_question: str) -> list[dict[str, str]]:
@@ -168,6 +209,8 @@ async def run_sub_questions_slice(
     primary_exe: ExecuteSqlResponse | None,
     first_sub_question_override: str | None,
     duplicate_fail_index: int | None,
+    persist_session: PersistPulsecastSession | None = None,
+    session_id: str | None = None,
 ) -> tuple[list[SubResult], str, ExecuteSqlResponse] | CompletionStreamPaused:
     """Run sub-questions from start_index. On duplicate SQL: HITL pause or 422 if idx == duplicate_fail_index."""
     user_id = settings.default_user_id
@@ -595,6 +638,17 @@ async def run_sub_questions_slice(
                 execute=exe,
             )
         )
+        await _maybe_persist_sub_question_progress(
+            persist_session=persist_session,
+            session_id=session_id,
+            req=req,
+            question=question,
+            host_plan=host_plan,
+            analyst_plan=analyst_plan,
+            sub_results=sub_results,
+            primary_sql=primary_sql,
+            primary_exe=primary_exe,
+        )
         table_md = to_markdown_table((exe.data or [])[:20])
         await emit_text_chunks(
             on_progress=on_progress,
@@ -641,6 +695,8 @@ async def phase_sub_questions(
     host_plan: PlanningHostOutput,
     analyst_plan: PlanningAnalystOutput,
     on_progress: ProgressCallback | None,
+    persist_session: PersistPulsecastSession | None = None,
+    session_id: str | None = None,
 ) -> tuple[list[SubResult], str, ExecuteSqlResponse] | CompletionStreamPaused:
     return await run_sub_questions_slice(
         settings=settings,
@@ -655,6 +711,8 @@ async def phase_sub_questions(
         primary_exe=None,
         first_sub_question_override=None,
         duplicate_fail_index=None,
+        persist_session=persist_session,
+        session_id=session_id,
     )
 
 

@@ -38,6 +38,15 @@ class PulsecastChatResumeRequest(BaseModel):
     user: str | None = None
 
 
+class PulsecastChatRefineRequest(BaseModel):
+    """Follow-up turn on an existing in-memory Pulsecast session (same id as OpenAI `user`)."""
+
+    session_id: str = Field(..., min_length=1)
+    refinement: str = Field(..., min_length=1)
+    stream: bool = True
+    model: str = "pulsecast-qa"
+
+
 class PulsecastStreamControlRequest(BaseModel):
     """Pause or resume outbound SSE for an active chat completion stream."""
 

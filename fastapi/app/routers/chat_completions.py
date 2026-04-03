@@ -11,10 +11,11 @@ from app.models.schemas import (
     OpenAIChatCompletionResponse,
     OpenAIModelsListResponse,
     OpenAIModelCard,
+    PulsecastChatRefineRequest,
     PulsecastChatResumeRequest,
     PulsecastStreamControlRequest,
 )
-from app.services.chat_completions import stream_completion_sse, stream_resume_sse
+from app.services.chat_completions import stream_completion_sse, stream_refine_sse, stream_resume_sse
 from app.services.stream_pause_store import stream_pause_store
 from app.services.pulsecast_resume_store import (
     DuplicateSubQuestionPausedSnapshot,
@@ -48,6 +49,28 @@ async def chat_completions(
     job_id = uuid.uuid4().hex
     return StreamingResponse(
         stream_completion_sse(settings=settings, req=body, job_id=job_id),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Pulsecast-Stream-Job-Id": job_id,
+        },
+    )
+
+
+@router.post("/v1/chat/completions/refine", response_model=OpenAIChatCompletionResponse)
+async def chat_completions_refine(
+    body: PulsecastChatRefineRequest,
+    settings: Settings = Depends(get_settings),
+):
+    if not body.stream:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="stream must be true for this service",
+        )
+    job_id = uuid.uuid4().hex
+    return StreamingResponse(
+        stream_refine_sse(settings=settings, req=body, job_id=job_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

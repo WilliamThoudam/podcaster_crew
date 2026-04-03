@@ -507,6 +507,77 @@ export async function pulsecastStreamControl(body: {
   }
 }
 
+export type PulsecastRefineRequestBody = {
+  session_id: string
+  refinement: string
+}
+
+export async function streamPulsecastRefine(
+  body: PulsecastRefineRequestBody,
+  callbacks?: StreamCallbacks,
+  streamOptions?: PulsecastStreamOptions,
+): Promise<StreamQaOutcome> {
+  const req = {
+    model: 'pulsecast-qa',
+    stream: true,
+    session_id: body.session_id,
+    refinement: body.refinement,
+  }
+  let res: Response
+  try {
+    res = await fetch(`${apiBase()}/v1/chat/completions/refine`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req),
+      signal: streamOptions?.signal,
+    })
+  } catch (e) {
+    if (isAbortError(e)) return { kind: 'aborted' }
+    throw e
+  }
+  if (!res.ok) {
+    let msg = res.statusText
+    try {
+      const j = (await res.json()) as { error?: { message?: unknown }; detail?: unknown }
+      if (j.error?.message !== undefined) msg = parseDetail(j.error.message)
+      else if (j.detail !== undefined) msg = parseDetail(j.detail)
+    } catch {
+      /* ignore */
+    }
+    throw new Error(msg)
+  }
+
+  const jobHeader = res.headers.get('X-Pulsecast-Stream-Job-Id')
+  if (jobHeader) streamOptions?.onStreamJobId?.(jobHeader)
+
+  const raw = await consumeSseChatStream(res, callbacks, streamOptions)
+  if (raw.outcome === 'aborted') return { kind: 'aborted' }
+  if (raw.outcome === 'sql_approval_required') {
+    return {
+      kind: 'sql_approval_required',
+      resume_token: raw.resume_token,
+      proposed_sub_question: raw.proposed_sub_question,
+      rationale: raw.rationale,
+      pause_kind: raw.pause_kind,
+      web_search_step_index: raw.web_search_step_index,
+      web_search_total_steps: raw.web_search_total_steps,
+    }
+  }
+  if (raw.outcome === 'discussion_approval_required') {
+    return {
+      kind: 'discussion_approval_required',
+      resume_token: raw.resume_token,
+      stage: raw.stage,
+      requested_depth: raw.requested_depth,
+      round_index: raw.round_index,
+      max_rounds: raw.max_rounds,
+      focus_for_next_round: raw.focus_for_next_round,
+      rationale: raw.rationale,
+    }
+  }
+  return { kind: 'complete', answer: raw.assembled }
+}
+
 export async function streamPulsecastQa(
   body: QARequestBody,
   callbacks?: StreamCallbacks,

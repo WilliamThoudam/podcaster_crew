@@ -15,12 +15,18 @@ from app.models.schemas import (
     SubResult,
 )
 from app.services.pulsecast_completion_steps import (
+    collect_user_queries,
     phase_agents_finalize,
     phase_planning,
     phase_sub_questions,
     phase_web_search_hitl,
 )
-from app.services.pulsecast_completion_types import CompletionStreamOutcome, CompletionStreamPaused
+from app.services.pulsecast_completion_types import (
+    CompletionStreamComplete,
+    CompletionStreamOutcome,
+    CompletionStreamPaused,
+)
+from app.services.pulsecast_session_store import PulsecastSession, pulsecast_session_store
 
 
 class PulsecastState(TypedDict, total=False):
@@ -42,6 +48,18 @@ async def _node_planning(state: PulsecastState, config: RunnableConfig) -> dict[
         req=c["req"],
         on_progress=c.get("on_progress"),
     )
+    sid = (c.get("session_id") or "").strip()
+    persist = c.get("persist_pulsecast_session")
+    if sid and persist:
+        session = PulsecastSession(
+            session_id=sid,
+            raw_user_turns=collect_user_queries(c["req"]),
+            canonical_question=q,
+            host_plan=hp,
+            analyst_plan=ap,
+            completed_phase="after_planning",
+        )
+        await persist(session)
     return {"question": q, "host_plan": hp, "analyst_plan": ap}
 
 
@@ -54,6 +72,8 @@ async def _node_sub_questions(state: PulsecastState, config: RunnableConfig) -> 
         host_plan=state["host_plan"],
         analyst_plan=state["analyst_plan"],
         on_progress=c.get("on_progress"),
+        persist_session=c.get("persist_pulsecast_session"),
+        session_id=c.get("session_id"),
     )
     if isinstance(result, CompletionStreamPaused):
         return {"outcome": result}
@@ -77,6 +97,20 @@ async def _node_web_search(state: PulsecastState, config: RunnableConfig) -> dic
     if isinstance(result, CompletionStreamPaused):
         return {"outcome": result}
     completed_web_results, declined = result
+    sid = (c.get("session_id") or "").strip()
+    persist = c.get("persist_pulsecast_session")
+    if sid and persist:
+        prev = await pulsecast_session_store.get(sid)
+        if prev is not None:
+            await persist(
+                prev.model_copy(
+                    update={
+                        "completed_web_results": list(completed_web_results),
+                        "user_declined_web_search": bool(declined),
+                        "completed_phase": "after_web",
+                    }
+                )
+            )
     return {"completed_web_results": completed_web_results, "user_declined_web_search": declined}
 
 
@@ -109,6 +143,12 @@ async def _node_agents(state: PulsecastState, config: RunnableConfig) -> dict[st
         user_declined_web_search=bool(state.get("user_declined_web_search", False)),
         on_progress=c.get("on_progress"),
     )
+    sid = (c.get("session_id") or "").strip()
+    persist = c.get("persist_pulsecast_session")
+    if sid and persist and isinstance(out, CompletionStreamComplete):
+        prev = await pulsecast_session_store.get(sid)
+        if prev is not None:
+            await persist(prev.model_copy(update={"completed_phase": "after_agents"}))
     return {"outcome": out}
 
 
@@ -147,6 +187,11 @@ async def run_pulsecast_completion_graph(
     on_progress: Any | None,
 ) -> CompletionStreamOutcome:
     graph = _get_compiled_graph()
+    sid = (req.user or "").strip()
+
+    async def persist_pulsecast_session(session: PulsecastSession) -> None:
+        await pulsecast_session_store.save(session)
+
     final = await graph.ainvoke(
         {},
         config={
@@ -154,6 +199,8 @@ async def run_pulsecast_completion_graph(
                 "settings": settings,
                 "req": req,
                 "on_progress": on_progress,
+                "session_id": sid if sid else None,
+                "persist_pulsecast_session": persist_pulsecast_session if sid else None,
             },
         },
     )

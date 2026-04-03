@@ -23,7 +23,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.config import Settings
 from app.llm.chat_model import build_chat_model
-from app.prompts.aggregation_agent import (
+from app.prompts.llm_agents import (
     AGGREGATION_AGENT_SYSTEM,
     aggregation_agent_user_prompt,
 )

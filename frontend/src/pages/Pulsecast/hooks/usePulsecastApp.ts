@@ -274,14 +274,12 @@ function makePulsecastStreamHandlers(
     if (event.type === 'aggregation_done') {
       if (event.was_rewritten || event.action === 'rewrite') {
         const id = newId()
-        const conf =
-          event.confidence != null ? ` (confidence ${Math.round(event.confidence * 100)}%)` : ''
-        const stage = event.stage ? ` [${event.stage}]` : ''
-        upsertRoleMessage(
-          'AGGREGATION',
-          id,
-          `Aggregation Agent${stage}: ${event.action}${conf}.\n\n${event.reason ?? ''}`.trim(),
-        )
+        const title =
+          event.confidence != null
+            ? `SQL Aggregation Transformation (Confidence: ${Math.round(event.confidence * 100)}%)`
+            : 'SQL Aggregation Transformation'
+        const reasonBlock = event.reason?.trim() ? `\n\n${event.reason}` : ''
+        upsertRoleMessage('AGGREGATION', id, `${title}${reasonBlock}`.trim())
       }
       markThinking(null)
       return
@@ -293,10 +291,9 @@ function makePulsecastStreamHandlers(
         activeAggSql = ''
       }
       activeAggSql += event.chunk
-      const stageNote = event.stage
-        ? ` _(${event.stage})_`
-        : ''
-      const header = `Aggregation (SQL for execution) — step ${event.index}/${event.total}${stageNote}`
+      const stageTitle =
+        event.stage === 'post_exec_guard' ? 'Post-execution adjustment' : 'Final Preparation'
+      const header = `Aggregation (SQL for execution) — Step ${event.index} of ${event.total} (${stageTitle})`
       upsertRoleMessage(
         'AGGREGATION',
         activeAggSqlMsgId,

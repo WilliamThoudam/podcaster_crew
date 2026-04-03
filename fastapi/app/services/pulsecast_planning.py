@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.config import Settings
 from app.llm.chat_model import build_chat_model
 from app.models.schemas import PlanningAnalystOutput, PlanningHostOutput, SubResult
-from app.prompts.duplicate_sub_question import (
+from app.prompts.llm_agents import (
     duplicate_sub_question_strict_suffix,
     duplicate_sub_question_system_prompt,
 )

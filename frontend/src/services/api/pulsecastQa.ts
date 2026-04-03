@@ -157,6 +157,14 @@ export type StreamProgressEvent =
       row_count: number
       threshold: number
     }
+  | {
+      type: 'aggregation_sql_chunk'
+      index: number
+      total: number
+      sub_question: string
+      chunk: string
+      stage?: string
+    }
   | { type: 'tts_started'; index: number; total: number; sub_question: string }
   | { type: 'tts_label_chunk'; index: number; total: number; sub_question: string; chunk: string }
   | { type: 'tts_generating_chunk'; index: number; total: number; sub_question: string; chunk: string }

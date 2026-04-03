@@ -272,9 +272,30 @@ async def run_sub_questions_slice(
                 },
             )
 
-        sql = validate_and_normalize_sql((tts.generated_sql or "").strip())
-
+        tts_sql = validate_and_normalize_sql((tts.generated_sql or "").strip())
+        execution_sql = tts_sql
         strategy_result: QueryStrategyResult | None = None
+
+        await emit_text_chunks(
+            on_progress=on_progress,
+            base_event={
+                "index": idx + 1,
+                "total": total,
+                "sub_question": sub_q,
+            },
+            text=tts_sql,
+            event_type="tts_sql_chunk",
+        )
+        await emit_progress(
+            on_progress,
+            {
+                "type": "tts_done",
+                "index": idx + 1,
+                "total": total,
+                "sub_question": sub_q,
+            },
+        )
+
         if settings.query_strategy_enabled:
             await emit_progress(
                 on_progress,
@@ -287,10 +308,11 @@ async def run_sub_questions_slice(
             )
             strategy_result = await apply_query_strategy(
                 settings=settings,
-                original_sql=sql,
+                original_sql=tts_sql,
                 sub_question=sub_q,
                 user_intent=question,
             )
+            execution_sql = strategy_result.sql
             action = (
                 "skipped"
                 if strategy_result.decision is None
@@ -318,42 +340,20 @@ async def run_sub_questions_slice(
                     ),
                 },
             )
-            if strategy_result.was_rewritten:
-                await emit_progress(
-                    on_progress,
-                    {
-                        "type": "query_rewritten",
+            if execution_sql != tts_sql:
+                await emit_text_chunks(
+                    on_progress=on_progress,
+                    base_event={
                         "index": idx + 1,
                         "total": total,
                         "sub_question": sub_q,
-                        "reason": (
-                            strategy_result.decision.reason
-                            if strategy_result.decision
-                            else ""
-                        ),
+                        "stage": "pre_exec",
                     },
+                    text=execution_sql,
+                    event_type="aggregation_sql_chunk",
                 )
-            sql = strategy_result.sql
 
-        await emit_text_chunks(
-            on_progress=on_progress,
-            base_event={
-                "index": idx + 1,
-                "total": total,
-                "sub_question": sub_q,
-            },
-            text=sql,
-            event_type="tts_sql_chunk",
-        )
-        await emit_progress(
-            on_progress,
-            {
-                "type": "tts_done",
-                "index": idx + 1,
-                "total": total,
-                "sub_question": sub_q,
-            },
-        )
+        sql = execution_sql
         duplicate_sql = any(sr.generated_sql == sql for sr in sub_results)
         if duplicate_sql:
             await emit_progress(
@@ -504,6 +504,7 @@ async def run_sub_questions_slice(
             and not was_rewritten
             and len(exe.data or []) > settings.query_strategy_row_threshold
         ):
+            sql_before_rowcount_retry = sql
             await emit_progress(
                 on_progress,
                 {
@@ -556,20 +557,6 @@ async def run_sub_questions_slice(
                 },
             )
             if force_result.was_rewritten:
-                await emit_progress(
-                    on_progress,
-                    {
-                        "type": "query_rewritten",
-                        "index": idx + 1,
-                        "total": total,
-                        "sub_question": sub_q,
-                        "reason": (
-                            force_result.decision.reason
-                            if force_result.decision
-                            else "post-execution rowcount guard"
-                        ),
-                    },
-                )
                 try:
                     exe = await execute_sql_client(
                         settings=settings,
@@ -579,6 +566,18 @@ async def run_sub_questions_slice(
                         db_type=db_type,
                     )
                     if exe.success:
+                        if force_result.sql != sql_before_rowcount_retry:
+                            await emit_text_chunks(
+                                on_progress=on_progress,
+                                base_event={
+                                    "index": idx + 1,
+                                    "total": total,
+                                    "sub_question": sub_q,
+                                    "stage": "post_exec_guard",
+                                },
+                                text=force_result.sql,
+                                event_type="aggregation_sql_chunk",
+                            )
                         sql = force_result.sql
                         original_sql_for_trace = force_result.original_sql
                 except Exception:

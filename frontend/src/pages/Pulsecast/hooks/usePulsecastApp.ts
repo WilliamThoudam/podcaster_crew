@@ -91,6 +91,8 @@ function makePulsecastStreamHandlers(
   let activeTtsLabel = ''
   let activeTtsGenerating = ''
   let activeTtsSql = ''
+  let activeAggSqlMsgId: string | null = null
+  let activeAggSql = ''
   let activeExecLabel = ''
   let activeExecGenerating = ''
   let activeExecTable = ''
@@ -245,9 +247,8 @@ function makePulsecastStreamHandlers(
     }
     if (event.type === 'aggregation_started') {
       markThinking('AGGREGATION')
-      if (!activeExecMsgId) {
-        // keep separate bubble from TTS/EXEC; reuse exec slot only when needed
-      }
+      activeAggSql = ''
+      activeAggSqlMsgId = null
       return
     }
     if (event.type === 'rowcount_exceeded') {
@@ -271,7 +272,6 @@ function makePulsecastStreamHandlers(
       return
     }
     if (event.type === 'aggregation_done') {
-      // Show a short bubble only when a rewrite actually happened.
       if (event.was_rewritten || event.action === 'rewrite') {
         const id = newId()
         const conf =
@@ -284,6 +284,24 @@ function makePulsecastStreamHandlers(
         )
       }
       markThinking(null)
+      return
+    }
+    if (event.type === 'aggregation_sql_chunk') {
+      markThinking('AGGREGATION')
+      if (!activeAggSqlMsgId) {
+        activeAggSqlMsgId = newId()
+        activeAggSql = ''
+      }
+      activeAggSql += event.chunk
+      const stageNote = event.stage
+        ? ` _(${event.stage})_`
+        : ''
+      const header = `Aggregation (SQL for execution) — step ${event.index}/${event.total}${stageNote}`
+      upsertRoleMessage(
+        'AGGREGATION',
+        activeAggSqlMsgId,
+        `${header}\n\n\`\`\`sql\n${activeAggSql}\n\`\`\``,
+      )
       return
     }
     if (event.type === 'tts_started') {

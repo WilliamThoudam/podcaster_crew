@@ -67,9 +67,9 @@ def _serper_results_markdown(
     return "\n".join(lines)
 
 
-PulsecastRole = Literal["HOST", "ANALYST", "MARKETING", "FINANCE", "WEB_CRAWLER", "CHALLENGER"]
-PulsecastAgentId = Literal["host", "analyst", "marketing", "finance", "web_crawler", "challenger"]
-DiscussantRole = Literal["MARKETING", "FINANCE", "WEB_CRAWLER", "CHALLENGER"]
+PulsecastRole = Literal["HOST", "ANALYST", "MARKETING", "FINANCE", "FORECASTER", "WEB_CRAWLER", "CHALLENGER"]
+PulsecastAgentId = Literal["host", "analyst", "marketing", "finance", "forecaster", "web_crawler", "challenger"]
+DiscussantRole = Literal["MARKETING", "FINANCE", "FORECASTER", "WEB_CRAWLER", "CHALLENGER"]
 
 AgentProgressCallback = Callable[[dict[str, Any]], Union[Awaitable[None], None]] | None
 
@@ -568,6 +568,7 @@ def _agent_id(role: PulsecastRole) -> PulsecastAgentId:
         "ANALYST": "analyst",
         "MARKETING": "marketing",
         "FINANCE": "finance",
+        "FORECASTER": "forecaster",
         "WEB_CRAWLER": "web_crawler",
         "CHALLENGER": "challenger",
     }[role]
@@ -906,7 +907,7 @@ def discussion_state_from_legacy_prior(prior: dict[str, _AgentOut]) -> Discussio
         return None
     analyst = prior["ANALYST"]
     turns: list[DiscussionTurn] = []
-    for role in ("MARKETING", "FINANCE", "WEB_CRAWLER", "CHALLENGER"):
+    for role in ("MARKETING", "FINANCE", "FORECASTER", "WEB_CRAWLER", "CHALLENGER"):
         if role in prior:
             turns.append(DiscussionTurn(role=role, round_index=1, output=prior[role]))
     return DiscussionState(analyst=analyst, turns=turns)
@@ -940,8 +941,8 @@ async def _run_llm_agents_minimal(
         )
     )
     await _sse_discussion_analyst(on_progress, analyst_out)
-    for role in ("MARKETING", "FINANCE", "WEB_CRAWLER", "CHALLENGER"):
-        pr: PulsecastRole = role  # MARKETING|FINANCE|WEB_CRAWLER|CHALLENGER
+    for role in ("MARKETING", "FINANCE", "FORECASTER", "WEB_CRAWLER", "CHALLENGER"):
+        pr: PulsecastRole = role  # MARKETING|FINANCE|FORECASTER|WEB_CRAWLER|CHALLENGER
         pipeline.append(
             AgentPipelineStep(
                 id=_agent_id(pr),
@@ -986,6 +987,7 @@ async def _run_llm_agents_linear(
         "ANALYST",
         "MARKETING",
         "FINANCE",
+        "FORECASTER",
         "WEB_CRAWLER",
         "CHALLENGER",
     ]
@@ -1014,7 +1016,7 @@ async def _run_llm_agents_linear(
         )
         if role == "ANALYST":
             await _sse_discussion_analyst(on_progress, out)
-        elif role in ("MARKETING", "FINANCE", "WEB_CRAWLER", "CHALLENGER"):
+        elif role in ("MARKETING", "FINANCE", "FORECASTER", "WEB_CRAWLER", "CHALLENGER"):
             await _sse_discussion_turn(on_progress, role, 1, out)
         if role == "WEB_CRAWLER" and _serper_configured(settings):
             queries = _web_search_queries_for_hitl(out, analyst_plan)
@@ -1206,6 +1208,9 @@ async def _run_llm_agents_moderated_discussion(
             hitl = await _run_one_discussant(discussant="FINANCE", round_index=r)
             if hitl is not None:
                 return hitl
+            hitl = await _run_one_discussant(discussant="FORECASTER", round_index=r)
+            if hitl is not None:
+                return hitl
             prior_wc: dict[str, _AgentOut] = {"ANALYST": analyst_out}
             for t in turns:
                 prior_wc[t.role] = t.output
@@ -1251,7 +1256,7 @@ async def _run_llm_agents_moderated_discussion(
             if hitl is not None:
                 return hitl
         else:
-            for role in ("MARKETING", "FINANCE", "CHALLENGER"):
+            for role in ("MARKETING", "FINANCE", "FORECASTER", "CHALLENGER"):
                 hitl = await _run_one_discussant(discussant=role, round_index=r)
                 if hitl is not None:
                     return hitl

@@ -102,7 +102,7 @@ class SubResult(BaseModel):
 class AgentPipelineStep(BaseModel):
     """BRD agent lane + phase for Pulsecast Agent Status / future UI sync."""
 
-    id: Literal["host", "analyst", "marketing", "finance", "web_crawler", "challenger"]
+    id: Literal["host", "analyst", "marketing", "finance", "forecaster", "web_crawler", "challenger"]
     status: Literal["completed", "skipped"] = "completed"
     phase: str
     detail: str | None = None
@@ -111,7 +111,7 @@ class AgentPipelineStep(BaseModel):
 class AgentInsight(BaseModel):
     """One chat bubble aligned with podcast roles (HOST … CHALLENGER)."""
 
-    role: Literal["HOST", "ANALYST", "MARKETING", "FINANCE", "WEB_CRAWLER", "CHALLENGER"]
+    role: Literal["HOST", "ANALYST", "MARKETING", "FINANCE", "FORECASTER", "WEB_CRAWLER", "CHALLENGER"]
     text: str
 
 

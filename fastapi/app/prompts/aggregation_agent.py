@@ -22,6 +22,9 @@ AGGREGATION_AGENT_SYSTEM = (
     "- The query already contains `LIMIT` with a value <= 1000.\n"
     "- The query is a scalar aggregation (e.g. `SELECT COUNT(*)`, single-row result).\n"
     "- The sub_question asks for a specific record, entity lookup, or enumeration of distinct values.\n"
+    "- The user_intent or sub_question implies forecasting, projection, or future trends — time "
+    "dimensions (YEAR, MONTH, QUARTER) in GROUP BY MUST be preserved; collapsing them would destroy "
+    "the temporal grain needed for trend extrapolation.\n"
     "- You are not confident the rewrite preserves the analytical intent.\n\n"
 
     "## Rewrite Rules (when action = rewrite)\n"

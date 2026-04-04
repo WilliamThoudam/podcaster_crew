@@ -68,6 +68,9 @@ function prettyLabel(id: string): string {
 
 /** CSS modifier for agent border colors (matches pulsecast.css role vars). */
 function agentRoleModifier(id: string): string | undefined {
+  if (id.startsWith('sub_questions:')) {
+    return id.slice('sub_questions:'.length).replace(/_/g, '-')
+  }
   if (!id.startsWith('agents:')) return undefined
   const s = id.slice('agents:'.length)
   if (s === 'host_finalize') return 'host'

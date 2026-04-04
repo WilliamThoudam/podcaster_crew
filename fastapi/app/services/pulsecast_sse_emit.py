@@ -19,6 +19,22 @@ async def emit_progress(cb: ProgressCallback | None, event: dict[str, Any]) -> N
         await maybe
 
 
+async def emit_pulsecast_graph_node(
+    on_progress: ProgressCallback | None,
+    *,
+    node: str,
+    entering: bool,
+) -> None:
+    """Emit ``graph_node_entered`` / ``graph_node_exited`` for any topology id (e.g. ``agents:analyst``)."""
+    await emit_progress(
+        on_progress,
+        {
+            "type": "graph_node_entered" if entering else "graph_node_exited",
+            "node": node,
+        },
+    )
+
+
 async def emit_agents_subgraph_node(
     on_progress: ProgressCallback | None,
     *,
@@ -26,12 +42,10 @@ async def emit_agents_subgraph_node(
     entering: bool,
 ) -> None:
     """Mirror LangGraph subgraph node names (e.g. ``analyst`` -> ``agents:analyst``) for resume streams."""
-    await emit_progress(
+    await emit_pulsecast_graph_node(
         on_progress,
-        {
-            "type": "graph_node_entered" if entering else "graph_node_exited",
-            "node": f"agents:{subgraph_node}",
-        },
+        node=f"agents:{subgraph_node}",
+        entering=entering,
     )
 
 

@@ -8,6 +8,8 @@ router = APIRouter(tags=["graph"])
 
 _CONDITION_LABELS: dict[tuple[str, str], str] = {
     ("sub_questions", "__end__"): "paused",
+    ("sub_questions", "sub_questions:aggregation"): "nested",
+    ("sub_questions:aggregation", "sub_questions"): "continue",
     ("web_search", "__end__"): "paused",
     ("agents:init_agents", "agents:depth_gate"): "needs gate",
     ("agents:init_agents", "agents:analyst"): "continue",
@@ -33,7 +35,7 @@ def _topology_node_type(node_id: str) -> str:
     nid = node_id
     if nid.endswith(":depth_gate") or nid.endswith(":round_gate"):
         return "gate"
-    if nid.startswith("agents:"):
+    if nid.startswith("agents:") or nid.startswith("sub_questions:"):
         return "agent"
     return "node"
 
@@ -70,6 +72,22 @@ async def graph_topology(response: Response):
             "target": tgt,
             "conditional": conditional,
             "condition_label": label,
+        })
+
+    agg_id = "sub_questions:aggregation"
+    if agg_id not in drawable.nodes:
+        nodes.append({"id": agg_id, "type": "agent"})
+        edges.append({
+            "source": "sub_questions",
+            "target": agg_id,
+            "conditional": True,
+            "condition_label": _CONDITION_LABELS.get(("sub_questions", agg_id), "nested"),
+        })
+        edges.append({
+            "source": agg_id,
+            "target": "sub_questions",
+            "conditional": True,
+            "condition_label": _CONDITION_LABELS.get((agg_id, "sub_questions"), "continue"),
         })
 
     return {"nodes": nodes, "edges": edges}

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
@@ -47,6 +48,7 @@ from app.services.pulsecast_resume_store import (
 from app.services.pulsecast_sse_emit import (
     STREAM_CHUNK_SIZE,
     STREAM_DELAY_S,
+    emit_pulsecast_graph_node,
     emit_progress,
     emit_text_chunks,
 )
@@ -73,6 +75,18 @@ def collect_user_queries(req: OpenAIChatCompletionRequest) -> list[str]:
             detail="messages must include at least one non-empty user message",
         )
     return out
+
+
+AGGREGATION_GRAPH_NODE_ID = "sub_questions:aggregation"
+
+
+@asynccontextmanager
+async def _sub_questions_aggregation_graph(on_progress: ProgressCallback | None):
+    await emit_pulsecast_graph_node(on_progress, node=AGGREGATION_GRAPH_NODE_ID, entering=True)
+    try:
+        yield
+    finally:
+        await emit_pulsecast_graph_node(on_progress, node=AGGREGATION_GRAPH_NODE_ID, entering=False)
 
 
 PersistPulsecastSession = Callable[[PulsecastSession], Awaitable[None]]
@@ -341,49 +355,50 @@ async def run_sub_questions_slice(
         )
 
         if settings.query_strategy_enabled:
-            await emit_progress(
-                on_progress,
-                {
-                    "type": "aggregation_started",
-                    "index": idx + 1,
-                    "total": total,
-                    "sub_question": sub_q,
-                },
-            )
-            strategy_result = await apply_query_strategy(
-                settings=settings,
-                original_sql=tts_sql,
-                sub_question=sub_q,
-                user_intent=question,
-            )
-            execution_sql = strategy_result.sql
-            action = (
-                "skipped"
-                if strategy_result.decision is None
-                else strategy_result.decision.action
-            )
-            await emit_progress(
-                on_progress,
-                {
-                    "type": "aggregation_done",
-                    "index": idx + 1,
-                    "total": total,
-                    "sub_question": sub_q,
-                    "action": action,
-                    "was_rewritten": bool(strategy_result.was_rewritten),
-                    "sql_changed": bool(strategy_result.sql != strategy_result.original_sql),
-                    "confidence": (
-                        float(strategy_result.decision.confidence)
-                        if strategy_result.decision is not None
-                        else None
-                    ),
-                    "reason": (
-                        strategy_result.decision.reason
-                        if strategy_result.decision is not None
-                        else None
-                    ),
-                },
-            )
+            async with _sub_questions_aggregation_graph(on_progress):
+                await emit_progress(
+                    on_progress,
+                    {
+                        "type": "aggregation_started",
+                        "index": idx + 1,
+                        "total": total,
+                        "sub_question": sub_q,
+                    },
+                )
+                strategy_result = await apply_query_strategy(
+                    settings=settings,
+                    original_sql=tts_sql,
+                    sub_question=sub_q,
+                    user_intent=question,
+                )
+                execution_sql = strategy_result.sql
+                action = (
+                    "skipped"
+                    if strategy_result.decision is None
+                    else strategy_result.decision.action
+                )
+                await emit_progress(
+                    on_progress,
+                    {
+                        "type": "aggregation_done",
+                        "index": idx + 1,
+                        "total": total,
+                        "sub_question": sub_q,
+                        "action": action,
+                        "was_rewritten": bool(strategy_result.was_rewritten),
+                        "sql_changed": bool(strategy_result.sql != strategy_result.original_sql),
+                        "confidence": (
+                            float(strategy_result.decision.confidence)
+                            if strategy_result.decision is not None
+                            else None
+                        ),
+                        "reason": (
+                            strategy_result.decision.reason
+                            if strategy_result.decision is not None
+                            else None
+                        ),
+                    },
+                )
             if execution_sql != tts_sql:
                 await emit_text_chunks(
                     on_progress=on_progress,
@@ -560,46 +575,47 @@ async def run_sub_questions_slice(
                     "threshold": settings.query_strategy_row_threshold,
                 },
             )
-            await emit_progress(
-                on_progress,
-                {
-                    "type": "aggregation_started",
-                    "index": idx + 1,
-                    "total": total,
-                    "sub_question": sub_q,
-                    "stage": "post_exec_guard",
-                },
-            )
-            force_result = await force_rewrite_after_execution(
-                settings=settings,
-                original_sql=sql,
-                sub_question=sub_q,
-                user_intent=question,
-                row_count=len(exe.data or []),
-            )
-            await emit_progress(
-                on_progress,
-                {
-                    "type": "aggregation_done",
-                    "index": idx + 1,
-                    "total": total,
-                    "sub_question": sub_q,
-                    "stage": "post_exec_guard",
-                    "action": force_result.decision.action if force_result.decision else "skipped",
-                    "was_rewritten": bool(force_result.was_rewritten),
-                    "sql_changed": bool(force_result.sql != force_result.original_sql),
-                    "confidence": (
-                        float(force_result.decision.confidence)
-                        if force_result.decision is not None
-                        else None
-                    ),
-                    "reason": (
-                        force_result.decision.reason
-                        if force_result.decision is not None
-                        else None
-                    ),
-                },
-            )
+            async with _sub_questions_aggregation_graph(on_progress):
+                await emit_progress(
+                    on_progress,
+                    {
+                        "type": "aggregation_started",
+                        "index": idx + 1,
+                        "total": total,
+                        "sub_question": sub_q,
+                        "stage": "post_exec_guard",
+                    },
+                )
+                force_result = await force_rewrite_after_execution(
+                    settings=settings,
+                    original_sql=sql,
+                    sub_question=sub_q,
+                    user_intent=question,
+                    row_count=len(exe.data or []),
+                )
+                await emit_progress(
+                    on_progress,
+                    {
+                        "type": "aggregation_done",
+                        "index": idx + 1,
+                        "total": total,
+                        "sub_question": sub_q,
+                        "stage": "post_exec_guard",
+                        "action": force_result.decision.action if force_result.decision else "skipped",
+                        "was_rewritten": bool(force_result.was_rewritten),
+                        "sql_changed": bool(force_result.sql != force_result.original_sql),
+                        "confidence": (
+                            float(force_result.decision.confidence)
+                            if force_result.decision is not None
+                            else None
+                        ),
+                        "reason": (
+                            force_result.decision.reason
+                            if force_result.decision is not None
+                            else None
+                        ),
+                    },
+                )
             if force_result.was_rewritten:
                 try:
                     exe = await execute_sql_client(

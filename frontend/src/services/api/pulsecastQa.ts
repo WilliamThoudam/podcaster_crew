@@ -126,6 +126,8 @@ export type PulsecastResumeRequestBody = {
   edited_question?: string
   /** Merge into paused discussion question (skips full /refine replan). */
   discussion_refinement?: string
+  /** Merge into canonical question while resuming SQL / web-search / duplicate-sub HITL. */
+  question_refinement?: string
   session_id?: string
 }
 
@@ -662,6 +664,7 @@ export async function streamPulsecastResume(
     approved: body.approved,
     edited_question: body.edited_question,
     discussion_refinement: body.discussion_refinement,
+    question_refinement: body.question_refinement,
     user: body.session_id,
   }
   let res: Response

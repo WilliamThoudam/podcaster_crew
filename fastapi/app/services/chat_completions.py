@@ -167,6 +167,21 @@ async def _gated_yields(job_id: str, line: str) -> AsyncIterator[str]:
         yield part
 
 
+async def _merge_paused_question_with_refinement(
+    *,
+    settings: Settings,
+    base_question: str,
+    question_refinement: str | None,
+) -> str:
+    r = (question_refinement or "").strip()
+    if not r:
+        return base_question
+    try:
+        return await merge_conversational_bi_query(settings=settings, queries=[base_question, r])
+    except UpstreamServiceError:
+        return f"{base_question}\n\n(Additional constraint: {r})"
+
+
 async def _drain_gated_yields(job_id: str) -> AsyncIterator[str]:
     for part in await stream_pause_store.drain_outbound(job_id):
         yield part
@@ -538,9 +553,15 @@ async def build_resume_payload(
     snapshot: PulsecastPausedSnapshot,
     approved: bool,
     edited_question: str | None,
+    question_refinement: str | None = None,
     on_progress: ProgressCallback | None = None,
 ) -> CompletionStreamComplete:
     """After HITL: optional follow-up SQL + HOST composer; always returns final markdown."""
+    merged_q = await _merge_paused_question_with_refinement(
+        settings=settings,
+        base_question=snapshot.question,
+        question_refinement=question_refinement,
+    )
     user_id = settings.default_user_id
     user_db_id = settings.default_user_db_id
     db_type = settings.default_db_type
@@ -553,7 +574,7 @@ async def build_resume_payload(
         await emit_progress(on_progress, {"type": "sql_followup_declined"})
         agents_done = await run_llm_agents_host_only(
             settings=settings,
-            question=snapshot.question,
+            question=merged_q,
             generated_sql=snapshot.generated_sql,
             exe=snapshot.primary_exe,
             deterministic_summary=snapshot.deterministic_summary,
@@ -566,7 +587,7 @@ async def build_resume_payload(
         )
         await _sync_pulsecast_session_after_hitl_answer(
             openai_user=snapshot.openai_user,
-            question=snapshot.question,
+            question=merged_q,
             host_plan=snapshot.host_plan,
             analyst_plan=snapshot.analyst_plan,
             sub_results=sub_results,
@@ -791,7 +812,7 @@ async def build_resume_payload(
 
     agents_done = await run_llm_agents_host_only(
         settings=settings,
-        question=snapshot.question,
+        question=merged_q,
         generated_sql=snapshot.generated_sql,
         exe=snapshot.primary_exe,
         deterministic_summary=snapshot.deterministic_summary,
@@ -804,7 +825,7 @@ async def build_resume_payload(
     )
     await _sync_pulsecast_session_after_hitl_answer(
         openai_user=snapshot.openai_user,
-        question=snapshot.question,
+        question=merged_q,
         host_plan=snapshot.host_plan,
         analyst_plan=snapshot.analyst_plan,
         sub_results=sub_results,
@@ -1182,9 +1203,15 @@ async def build_resume_duplicate_sub_question_payload(
     snapshot: DuplicateSubQuestionPausedSnapshot,
     approved: bool,
     edited_question: str | None,
+    question_refinement: str | None = None,
     on_progress: ProgressCallback | None = None,
 ) -> CompletionStreamOutcome:
     """Resume after duplicate-SQL HITL: finish sub-questions, then agent panel."""
+    merged_q = await _merge_paused_question_with_refinement(
+        settings=settings,
+        base_question=snapshot.question,
+        question_refinement=question_refinement,
+    )
     openai_req = _openai_request_for_duplicate_snapshot(snapshot)
 
     if not approved:
@@ -1192,7 +1219,7 @@ async def build_resume_duplicate_sub_question_payload(
         sub_out = await run_sub_questions_slice(
             settings=settings,
             req=openai_req,
-            question=snapshot.question,
+            question=merged_q,
             host_plan=snapshot.host_plan,
             analyst_plan=snapshot.analyst_plan,
             on_progress=on_progress,
@@ -1209,7 +1236,7 @@ async def build_resume_duplicate_sub_question_payload(
         return await _phase_agents_finalize_maybe_sync_session(
             settings=settings,
             req=openai_req,
-            question=snapshot.question,
+            question=merged_q,
             host_plan=snapshot.host_plan,
             analyst_plan=snapshot.analyst_plan,
             primary_sql=primary_sql,
@@ -1233,7 +1260,7 @@ async def build_resume_duplicate_sub_question_payload(
     sub_out = await run_sub_questions_slice(
         settings=settings,
         req=openai_req,
-        question=snapshot.question,
+        question=merged_q,
         host_plan=snapshot.host_plan,
         analyst_plan=snapshot.analyst_plan,
         on_progress=on_progress,
@@ -1250,7 +1277,7 @@ async def build_resume_duplicate_sub_question_payload(
     return await _phase_agents_finalize_maybe_sync_session(
         settings=settings,
         req=openai_req,
-        question=snapshot.question,
+        question=merged_q,
         host_plan=snapshot.host_plan,
         analyst_plan=snapshot.analyst_plan,
         primary_sql=primary_sql,
@@ -1267,9 +1294,15 @@ async def build_resume_web_search_payload(
     snapshot: WebSearchPausedSnapshot,
     approved: bool,
     edited_question: str | None,
+    question_refinement: str | None = None,
     on_progress: ProgressCallback | None = None,
 ) -> CompletionStreamOutcome:
     """After web-search HITL: Serper (if approved), Challenger + Host; may pause again on SQL follow-up."""
+    merged_q = await _merge_paused_question_with_refinement(
+        settings=settings,
+        base_question=snapshot.question,
+        question_refinement=question_refinement,
+    )
     if not approved:
         await emit_progress(on_progress, {"type": "web_search_declined"})
 
@@ -1278,7 +1311,7 @@ async def build_resume_web_search_payload(
         openai_req = OpenAIChatCompletionRequest(
             model="pulsecast-qa",
             stream=True,
-            messages=[OpenAIChatMessage(role="user", content=snapshot.question)],
+            messages=[OpenAIChatMessage(role="user", content=merged_q)],
             user=snapshot.openai_user,
         )
 
@@ -1300,13 +1333,13 @@ async def build_resume_web_search_payload(
                 settings=settings,
                 query=None,
                 markdown_body=md,
-                context_question=snapshot.question,
+                context_question=merged_q,
                 organic_for_takeaways=None,
             )
             return await _phase_agents_finalize_maybe_sync_session(
                 settings=settings,
                 req=openai_req,
-                question=snapshot.question,
+                question=merged_q,
                 host_plan=snapshot.host_plan,
                 analyst_plan=snapshot.analyst_plan,
                 primary_sql=snapshot.generated_sql,
@@ -1349,7 +1382,7 @@ async def build_resume_web_search_payload(
             settings=settings,
             query=q or None,
             markdown_body=md,
-            context_question=snapshot.question,
+            context_question=merged_q,
             organic_for_takeaways=takeaway_rows,
         )
 
@@ -1359,7 +1392,7 @@ async def build_resume_web_search_payload(
                 stage="pre",
                 pipeline=None,
                 discussion=None,
-                question=snapshot.question,
+                question=merged_q,
                 generated_sql=snapshot.generated_sql,
                 primary_exe=snapshot.primary_exe,
                 deterministic_summary=snapshot.deterministic_summary,
@@ -1395,7 +1428,7 @@ async def build_resume_web_search_payload(
         return await _phase_agents_finalize_maybe_sync_session(
             settings=settings,
             req=openai_req,
-            question=snapshot.question,
+            question=merged_q,
             host_plan=snapshot.host_plan,
             analyst_plan=snapshot.analyst_plan,
             primary_sql=snapshot.generated_sql,
@@ -1410,7 +1443,7 @@ async def build_resume_web_search_payload(
     # Existing path: mid-discussion web-search (WEB_CRAWLER requested it).
     agents_out = await run_llm_agents_after_web_hitl(
         settings=settings,
-        question=snapshot.question,
+        question=merged_q,
         generated_sql=snapshot.generated_sql,
         exe=snapshot.primary_exe,
         deterministic_summary=snapshot.deterministic_summary,
@@ -1510,7 +1543,7 @@ async def build_resume_web_search_payload(
     await emit_progress(on_progress, {"type": "summarizing_done"})
     await _sync_pulsecast_session_after_hitl_answer(
         openai_user=snapshot.openai_user,
-        question=snapshot.question,
+        question=merged_q,
         host_plan=snapshot.host_plan,
         analyst_plan=snapshot.analyst_plan,
         sub_results=list(snapshot.sub_results),
@@ -1535,6 +1568,7 @@ async def build_resume_dispatcher(
             snapshot=snapshot,
             approved=req.approved,
             edited_question=req.edited_question,
+            question_refinement=req.question_refinement,
             on_progress=on_progress,
         )
     if isinstance(snapshot, DuplicateSubQuestionPausedSnapshot):
@@ -1543,6 +1577,7 @@ async def build_resume_dispatcher(
             snapshot=snapshot,
             approved=req.approved,
             edited_question=req.edited_question,
+            question_refinement=req.question_refinement,
             on_progress=on_progress,
         )
     if isinstance(snapshot, DiscussionPausedSnapshot):
@@ -1558,6 +1593,7 @@ async def build_resume_dispatcher(
         snapshot=snapshot,
         approved=req.approved,
         edited_question=req.edited_question,
+        question_refinement=req.question_refinement,
         on_progress=on_progress,
     )
 

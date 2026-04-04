@@ -881,6 +881,8 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
         let result: StreamQaOutcome
         const discToken = discussionHitlToken
         const resumeDiscussionWithRefinement = discussionHitlOpen && Boolean(discToken)
+        const sqlToken = sqlHitlToken
+        const resumeSqlWithChatRefinement = sqlHitlOpen && Boolean(sqlToken)
         if (resumeDiscussionWithRefinement) {
           setDiscussionHitlOpen(false)
           result = await streamPulsecastResume(
@@ -888,6 +890,20 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
               resume_token: discToken,
               approved: true,
               discussion_refinement: q,
+              session_id: qaSessionRef.current ?? undefined,
+            },
+            streamCallbacks,
+            streamOpts,
+          )
+        } else if (resumeSqlWithChatRefinement) {
+          setSqlHitlOpen(false)
+          const editedFromDialog = sqlHitlEdited.trim() || sqlHitlProposed.trim()
+          result = await streamPulsecastResume(
+            {
+              resume_token: sqlToken,
+              approved: true,
+              edited_question: editedFromDialog || undefined,
+              question_refinement: q,
               session_id: qaSessionRef.current ?? undefined,
             },
             streamCallbacks,
@@ -1008,6 +1024,11 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
         setSqlHitlPauseKind('challenger_followup')
         setSqlHitlWebSearchStep(null)
         setSqlHitlWebSearchTotal(null)
+        setSqlHitlToken(null)
+        setSqlHitlProposed('')
+        setSqlHitlEdited('')
+        setSqlHitlRationale(null)
+        setSqlHitlOpen(false)
         setDiscussionHitlToken(null)
         setDiscussionHitlStage('pre')
         setDiscussionHitlRequestedDepth(null)
@@ -1066,7 +1087,17 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
         qaStreamAbortRef.current = null
       }
     },
-    [qaInput, qaMessages, setThinkingRole, discussionHitlOpen, discussionHitlToken],
+    [
+      qaInput,
+      qaMessages,
+      setThinkingRole,
+      discussionHitlOpen,
+      discussionHitlToken,
+      sqlHitlOpen,
+      sqlHitlToken,
+      sqlHitlEdited,
+      sqlHitlProposed,
+    ],
   )
 
   const submitSqlHitl = useCallback(

@@ -35,6 +35,8 @@ class PulsecastChatResumeRequest(BaseModel):
     edited_question: str | None = None
     #: When resuming discussion_approval_required, merge this text into the paused canonical question (same session, no replan).
     discussion_refinement: str | None = None
+    #: When resuming sql_approval_required / web_search / duplicate_sub_question, merge this into the paused canonical question (chat follow-up while dialog is open).
+    question_refinement: str | None = None
     stream: bool = True
     model: str = "pulsecast-qa"
     user: str | None = None

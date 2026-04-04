@@ -15,6 +15,7 @@ import {
   streamPulsecastRefine,
   streamPulsecastResume,
   type SqlHitlPauseKind,
+  type StreamQaOutcome,
 } from '../../../services/api/pulsecastQa'
 import { colorToRgb, cumulativeMsBeforeSegment, fmt, segmentIndexAtElapsed } from '../utils'
 import { pathForScreen } from '../../../routes/paths'
@@ -877,8 +878,22 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
           onDelta: stream.onDelta,
           onProgress: stream.onProgress,
         }
-        let result: Awaited<ReturnType<typeof streamPulsecastQa>>
-        if (priorUserTurns >= 1 && qaSessionRef.current) {
+        let result: StreamQaOutcome
+        const discToken = discussionHitlToken
+        const resumeDiscussionWithRefinement = discussionHitlOpen && Boolean(discToken)
+        if (resumeDiscussionWithRefinement) {
+          setDiscussionHitlOpen(false)
+          result = await streamPulsecastResume(
+            {
+              resume_token: discToken,
+              approved: true,
+              discussion_refinement: q,
+              session_id: qaSessionRef.current ?? undefined,
+            },
+            streamCallbacks,
+            streamOpts,
+          )
+        } else if (priorUserTurns >= 1 && qaSessionRef.current) {
           try {
             result = await streamPulsecastRefine(
               { session_id: qaSessionRef.current, refinement: q },
@@ -993,6 +1008,13 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
         setSqlHitlPauseKind('challenger_followup')
         setSqlHitlWebSearchStep(null)
         setSqlHitlWebSearchTotal(null)
+        setDiscussionHitlToken(null)
+        setDiscussionHitlStage('pre')
+        setDiscussionHitlRequestedDepth(null)
+        setDiscussionHitlRoundIndex(1)
+        setDiscussionHitlMaxRounds(1)
+        setDiscussionHitlFocusForNextRound(null)
+        setDiscussionHitlRationale(null)
         if (!stream.getTypingBubbleCreated()) {
           setQaMessages((m) => [
             ...m,
@@ -1021,6 +1043,7 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
           setQaMessages((m) => m.filter((msgItem) => msgItem.id !== streamMsgId))
         }
         setAgentStates(AGENTS.map(() => 'idle'))
+        setDiscussionHitlToken(null)
         setQaMessages((m) => [
           ...m,
           {
@@ -1043,7 +1066,7 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
         qaStreamAbortRef.current = null
       }
     },
-    [qaInput, qaMessages, setThinkingRole],
+    [qaInput, qaMessages, setThinkingRole, discussionHitlOpen, discussionHitlToken],
   )
 
   const submitSqlHitl = useCallback(

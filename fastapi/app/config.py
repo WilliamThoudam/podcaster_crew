@@ -31,10 +31,13 @@ class Settings(BaseSettings):
     default_user_db_id: int = 1
     default_db_type: str = "snowflake"
     default_schema_name: str = "dev"
-    default_model: str = "huggingface/deepseek-ai/DeepSeek-V3-0324"
+    default_model: str = "solutionec/qwen2.5-coder-14b-awq"
     default_max_nodes: str = "15"
 
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
+
+    # PostgreSQL for session/resume persistence and LangGraph checkpointing (optional).
+    database_url: str | None = None
 
     # Serper (google.serper.dev) — Web Crawler agent; optional
     serper_api_key: str | None = None
@@ -42,6 +45,9 @@ class Settings(BaseSettings):
     web_search_summarize_enabled: bool = True
 
     pulsecast_discussion_max_rounds: int = 3
+
+    # In-memory Pulsecast session TTL (refine + checkpoints); use Redis-backed store for multi-worker.
+    pulsecast_session_ttl_seconds: float = 1800.0
 
     # LLM context: how many SQL result rows each agent sees (full execution still returns all rows)
     pulsecast_context_sample_max_rows: int = 40

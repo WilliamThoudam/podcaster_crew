@@ -39,6 +39,22 @@ cd fastapi
 python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000 --reload-delay 0.5
 ```
 
+### Windows + `DATABASE_URL` (async Postgres / psycopg)
+
+Uvicorn uses **ProactorEventLoop** on Windows by default; **psycopg async** requires a **selector** loop. If startup fails with `Psycopg cannot use the 'ProactorEventLoop'`, either:
+
+```bash
+python -m app
+```
+
+(from `fastapi`, uses `SelectorEventLoop` on Windows only), or pass the custom loop explicitly:
+
+```bash
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --loop app.loops:selector_loop_factory
+```
+
+With `--reload`, keep the same `--loop` flag on the command line.
+
 ### Reload noise (`ERROR` / `CancelledError` in the log)
 
 If you see a traceback ending in `asyncio.exceptions.CancelledError` or `KeyboardInterrupt` right after **WatchFiles** reloads, that is the **old worker being stopped** while Starlette’s lifespan loop is still waiting on `receive()`. It is **not** a failure of your routes (the next line is often `Started server process` and requests still return 200).

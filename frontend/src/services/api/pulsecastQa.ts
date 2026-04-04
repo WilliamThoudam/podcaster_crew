@@ -124,6 +124,8 @@ export type PulsecastResumeRequestBody = {
   resume_token: string
   approved: boolean
   edited_question?: string
+  /** Merge into paused discussion question (skips full /refine replan). */
+  discussion_refinement?: string
   session_id?: string
 }
 
@@ -659,6 +661,7 @@ export async function streamPulsecastResume(
     resume_token: body.resume_token,
     approved: body.approved,
     edited_question: body.edited_question,
+    discussion_refinement: body.discussion_refinement,
     user: body.session_id,
   }
   let res: Response

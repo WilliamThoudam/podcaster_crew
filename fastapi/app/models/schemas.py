@@ -33,6 +33,8 @@ class PulsecastChatResumeRequest(BaseModel):
     resume_token: str = Field(..., min_length=1)
     approved: bool
     edited_question: str | None = None
+    #: When resuming discussion_approval_required, merge this text into the paused canonical question (same session, no replan).
+    discussion_refinement: str | None = None
     stream: bool = True
     model: str = "pulsecast-qa"
     user: str | None = None

@@ -445,7 +445,8 @@ class PostgresResumeStore:
         if row is None:
             return None
         try:
-            return deserialize_paused_snapshot(row[0])
+            # Pool uses dict_row; RETURNING snapshot is keyed by column name.
+            return deserialize_paused_snapshot(row["snapshot"])
         except (KeyError, ValueError, TypeError):
             return None
 

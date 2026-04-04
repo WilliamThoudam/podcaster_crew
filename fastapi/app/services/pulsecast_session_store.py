@@ -146,7 +146,8 @@ class PostgresSessionStore:
             row = await cur.fetchone()
             if row is None:
                 return None
-            return PulsecastSession.model_validate(row[0])
+            # Pool uses dict_row; column access is by name, not row[0].
+            return PulsecastSession.model_validate(row["data"])
 
     async def save(self, session: PulsecastSession) -> None:
         data_json = json.dumps(session.model_dump(mode="json"))

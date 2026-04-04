@@ -5,14 +5,17 @@ import contextlib
 import json
 import time
 import uuid
+from dataclasses import replace
 from typing import Any, AsyncIterator
 
 import httpx
 from fastapi import HTTPException, status
 
 from app.clients.execute_sql import execute_sql as execute_sql_client
+from app.clients.merge_bi_query import merge_conversational_bi_query
 from app.clients.text_to_sql import generate_sql
 from app.config import Settings
+from app.errors import UpstreamServiceError
 from app.graph.pulsecast_graph import run_pulsecast_completion_graph
 from app.models.schemas import (
     ExecuteSqlResponse,
@@ -29,6 +32,7 @@ from app.models.schemas import (
     TextToSqlResponse,
 )
 from app.services.pulsecast_completion_steps import (
+    collect_user_queries,
     phase_agents_finalize,
     phase_planning,
     phase_web_search_hitl,
@@ -36,6 +40,7 @@ from app.services.pulsecast_completion_steps import (
     sub_question_tts_messages,
     to_markdown_table,
 )
+from app.services.pulsecast_planning import run_host_planner
 from app.services.pulsecast_session_store import (
     PulsecastSession,
     pulsecast_session_store,
@@ -207,6 +212,80 @@ async def build_refine_payload(
         user=sid,
     )
 
+    # ------------------------------------------------------------------
+    # Fast-path: session already has complete SQL results (discussion was
+    # in progress or finished).  Merge the refinement into the canonical
+    # question, re-run only the HOST planner for an updated focus, then
+    # jump straight to agent finalization / discussion — no re-planning
+    # of sub-questions and no re-running SQL.
+    # ------------------------------------------------------------------
+    can_fast_path = (
+        stored.completed_phase in ("after_web", "after_agents")
+        and stored.sub_results
+        and stored.primary_sql
+        and stored.primary_exe is not None
+        and stored.host_plan is not None
+        and stored.analyst_plan is not None
+    )
+    if can_fast_path:
+        queries = collect_user_queries(req)
+        try:
+            merged_q = await merge_conversational_bi_query(settings=settings, queries=queries)
+        except UpstreamServiceError:
+            merged_q = f"{stored.canonical_question or queries[0]}\n\n(Additional constraint: {body.refinement.strip()})"
+
+        host_plan = await run_host_planner(settings=settings, question=merged_q)
+        await emit_progress(on_progress, {"type": "host_plan_started"})
+        host_line = (host_plan.primary_focus or "").strip() or merged_q
+        await emit_text_chunks(
+            on_progress=on_progress,
+            base_event={},
+            text=host_line,
+            event_type="host_plan_chunk",
+            chunk_size=STREAM_CHUNK_SIZE,
+            delay_s=STREAM_DELAY_S,
+        )
+        await emit_progress(on_progress, {"type": "host_plan_done"})
+
+        analyst_plan = stored.analyst_plan
+        sub_results = list(stored.sub_results)
+        primary_sql = stored.primary_sql
+        primary_exe = stored.primary_exe
+        completed_web_results = list(stored.completed_web_results)
+        user_declined_web_search = stored.user_declined_web_search
+
+        await persist(
+            session.model_copy(
+                update={
+                    "canonical_question": merged_q,
+                    "host_plan": host_plan,
+                    "completed_phase": "after_web",
+                }
+            )
+        )
+
+        agents_out = await phase_agents_finalize(
+            settings=settings,
+            req=req,
+            question=merged_q,
+            host_plan=host_plan,
+            analyst_plan=analyst_plan,
+            primary_sql=primary_sql,
+            primary_exe=primary_exe,
+            sub_results=sub_results,
+            completed_web_results=completed_web_results,
+            user_declined_web_search=user_declined_web_search,
+            on_progress=on_progress,
+        )
+        if isinstance(agents_out, CompletionStreamComplete):
+            prev_done = await pulsecast_session_store.get(sid)
+            if prev_done is not None:
+                await persist(prev_done.model_copy(update={"completed_phase": "after_agents"}))
+        return agents_out
+
+    # ------------------------------------------------------------------
+    # Normal path: full re-plan + SQL + web + agents
+    # ------------------------------------------------------------------
     q, host_plan, analyst_plan = await phase_planning(
         settings=settings,
         req=req,
@@ -808,59 +887,72 @@ async def build_resume_discussion_payload(
     settings: Settings,
     snapshot: DiscussionPausedSnapshot,
     approved: bool,
+    discussion_refinement: str | None = None,
     on_progress: ProgressCallback | None = None,
 ) -> CompletionStreamComplete | CompletionStreamPaused:
+    refinement = (discussion_refinement or "").strip()
+    if refinement:
+        try:
+            merged_q = await merge_conversational_bi_query(
+                settings=settings, queries=[snapshot.question, refinement]
+            )
+        except UpstreamServiceError:
+            merged_q = f"{snapshot.question}\n\n(Additional constraint: {refinement})"
+        snap = replace(snapshot, question=merged_q)
+    else:
+        snap = snapshot
+
     # Decline starting moderated discussion -> minimal (ANALYST→HOST)
-    if snapshot.stage == "pre" and not approved:
+    if snap.stage == "pre" and not approved:
         agents_done = await run_llm_agents_minimal_only(
             settings=settings,
-            question=snapshot.question,
-            generated_sql=snapshot.generated_sql,
-            exe=snapshot.primary_exe,
-            deterministic_summary=snapshot.deterministic_summary,
-            sub_results=list(snapshot.sub_results),
-            host_plan=snapshot.host_plan,
-            analyst_plan=snapshot.analyst_plan,
+            question=snap.question,
+            generated_sql=snap.generated_sql,
+            exe=snap.primary_exe,
+            deterministic_summary=snap.deterministic_summary,
+            sub_results=list(snap.sub_results),
+            host_plan=snap.host_plan,
+            analyst_plan=snap.analyst_plan,
             user_declined_web_search=False,
             on_progress=on_progress,
         )
         await _sync_pulsecast_session_after_hitl_answer(
-            openai_user=snapshot.openai_user,
-            question=snapshot.question,
-            host_plan=snapshot.host_plan,
-            analyst_plan=snapshot.analyst_plan,
-            sub_results=list(snapshot.sub_results),
-            primary_sql=snapshot.generated_sql,
-            primary_exe=snapshot.primary_exe,
+            openai_user=snap.openai_user,
+            question=snap.question,
+            host_plan=snap.host_plan,
+            analyst_plan=snap.analyst_plan,
+            sub_results=list(snap.sub_results),
+            primary_sql=snap.generated_sql,
+            primary_exe=snap.primary_exe,
         )
         return CompletionStreamComplete(content=agents_done.answer)
 
     # Approve starting discussion (linear or moderated)
-    if snapshot.stage == "pre" and approved:
+    if snap.stage == "pre" and approved:
         from app.services.pulsecast_llm_agents import _context_blob_compact
 
         ctx = _context_blob_compact(
-            question=snapshot.question,
-            generated_sql=snapshot.generated_sql,
-            exe=snapshot.primary_exe,
-            deterministic_summary=snapshot.deterministic_summary,
-            sub_results=list(snapshot.sub_results),
-            host_plan=snapshot.host_plan,
-            analyst_plan=snapshot.analyst_plan,
+            question=snap.question,
+            generated_sql=snap.generated_sql,
+            exe=snap.primary_exe,
+            deterministic_summary=snap.deterministic_summary,
+            sub_results=list(snap.sub_results),
+            host_plan=snap.host_plan,
+            analyst_plan=snap.analyst_plan,
             settings=settings,
         )
-        if snapshot.requested_depth == "linear":
+        if snap.requested_depth == "linear":
             from app.services.pulsecast_llm_agents import _run_llm_agents_linear
 
             agents_out = await _run_llm_agents_linear(
                 settings=settings,
-                question=snapshot.question,
-                generated_sql=snapshot.generated_sql,
-                exe=snapshot.primary_exe,
-                deterministic_summary=snapshot.deterministic_summary,
-                sr_list=list(snapshot.sub_results),
-                host_plan=snapshot.host_plan,
-                analyst_plan=snapshot.analyst_plan,
+                question=snap.question,
+                generated_sql=snap.generated_sql,
+                exe=snap.primary_exe,
+                deterministic_summary=snap.deterministic_summary,
+                sr_list=list(snap.sub_results),
+                host_plan=snap.host_plan,
+                analyst_plan=snap.analyst_plan,
                 ctx=ctx,
                 allow_sql_approval_pause=True,
                 on_progress=on_progress,
@@ -869,13 +961,13 @@ async def build_resume_discussion_payload(
             max_rounds = max(1, settings.pulsecast_discussion_max_rounds)
             agents_out = await _run_llm_agents_moderated_discussion(
                 settings=settings,
-                question=snapshot.question,
-                generated_sql=snapshot.generated_sql,
-                exe=snapshot.primary_exe,
-                deterministic_summary=snapshot.deterministic_summary,
-                sr_list=list(snapshot.sub_results),
-                host_plan=snapshot.host_plan,
-                analyst_plan=snapshot.analyst_plan,
+                question=snap.question,
+                generated_sql=snap.generated_sql,
+                exe=snap.primary_exe,
+                deterministic_summary=snap.deterministic_summary,
+                sr_list=list(snap.sub_results),
+                host_plan=snap.host_plan,
+                analyst_plan=snap.analyst_plan,
                 ctx=ctx,
                 allow_sql_approval_pause=True,
                 max_rounds=max_rounds,
@@ -884,108 +976,108 @@ async def build_resume_discussion_payload(
         return await _pause_from_discussion_agents_out(
             settings=settings,
             agents_out=agents_out,
-            openai_user=snapshot.openai_user,
+            openai_user=snap.openai_user,
             on_progress=on_progress,
-            question=snapshot.question,
-            host_plan=snapshot.host_plan,
-            analyst_plan=snapshot.analyst_plan,
-            sub_results=list(snapshot.sub_results),
-            primary_sql=snapshot.generated_sql,
-            primary_exe=snapshot.primary_exe,
+            question=snap.question,
+            host_plan=snap.host_plan,
+            analyst_plan=snap.analyst_plan,
+            sub_results=list(snap.sub_results),
+            primary_sql=snap.generated_sql,
+            primary_exe=snap.primary_exe,
         )
 
     # Between rounds: approved -> continue moderated; declined -> HOST finalize from transcript so far
-    if snapshot.stage == "mid" and not approved:
+    if snap.stage == "mid" and not approved:
         agents_done = await run_llm_agents_host_only(
             settings=settings,
-            question=snapshot.question,
-            generated_sql=snapshot.generated_sql,
-            exe=snapshot.primary_exe,
-            deterministic_summary=snapshot.deterministic_summary,
-            sub_results=list(snapshot.sub_results),
-            host_plan=snapshot.host_plan,
-            analyst_plan=snapshot.analyst_plan,
-            discussion=snapshot.discussion,  # type: ignore[arg-type]
-            pipeline=snapshot.pipeline or [],
+            question=snap.question,
+            generated_sql=snap.generated_sql,
+            exe=snap.primary_exe,
+            deterministic_summary=snap.deterministic_summary,
+            sub_results=list(snap.sub_results),
+            host_plan=snap.host_plan,
+            analyst_plan=snap.analyst_plan,
+            discussion=snap.discussion,  # type: ignore[arg-type]
+            pipeline=snap.pipeline or [],
             user_declined_extra_sql=False,
         )
         await _sync_pulsecast_session_after_hitl_answer(
-            openai_user=snapshot.openai_user,
-            question=snapshot.question,
-            host_plan=snapshot.host_plan,
-            analyst_plan=snapshot.analyst_plan,
-            sub_results=list(snapshot.sub_results),
-            primary_sql=snapshot.generated_sql,
-            primary_exe=snapshot.primary_exe,
+            openai_user=snap.openai_user,
+            question=snap.question,
+            host_plan=snap.host_plan,
+            analyst_plan=snap.analyst_plan,
+            sub_results=list(snap.sub_results),
+            primary_sql=snap.generated_sql,
+            primary_exe=snap.primary_exe,
         )
         return CompletionStreamComplete(content=agents_done.answer)
 
-    if snapshot.stage == "mid" and approved:
+    if snap.stage == "mid" and approved:
         from app.services.pulsecast_llm_agents import _context_blob_compact
 
         ctx = _context_blob_compact(
-            question=snapshot.question,
-            generated_sql=snapshot.generated_sql,
-            exe=snapshot.primary_exe,
-            deterministic_summary=snapshot.deterministic_summary,
-            sub_results=list(snapshot.sub_results),
-            host_plan=snapshot.host_plan,
-            analyst_plan=snapshot.analyst_plan,
+            question=snap.question,
+            generated_sql=snap.generated_sql,
+            exe=snap.primary_exe,
+            deterministic_summary=snap.deterministic_summary,
+            sub_results=list(snap.sub_results),
+            host_plan=snap.host_plan,
+            analyst_plan=snap.analyst_plan,
             settings=settings,
         )
         agents_out = await _run_llm_agents_moderated_discussion(
             settings=settings,
-            question=snapshot.question,
-            generated_sql=snapshot.generated_sql,
-            exe=snapshot.primary_exe,
-            deterministic_summary=snapshot.deterministic_summary,
-            sr_list=list(snapshot.sub_results),
-            host_plan=snapshot.host_plan,
-            analyst_plan=snapshot.analyst_plan,
+            question=snap.question,
+            generated_sql=snap.generated_sql,
+            exe=snap.primary_exe,
+            deterministic_summary=snap.deterministic_summary,
+            sr_list=list(snap.sub_results),
+            host_plan=snap.host_plan,
+            analyst_plan=snap.analyst_plan,
             ctx=ctx,
             allow_sql_approval_pause=True,
-            max_rounds=int(snapshot.max_rounds or settings.pulsecast_discussion_max_rounds),
+            max_rounds=int(snap.max_rounds or settings.pulsecast_discussion_max_rounds),
             on_progress=on_progress,
-            initial_discussion=snapshot.discussion,  # type: ignore[arg-type]
-            initial_pipeline=snapshot.pipeline,
-            start_round=int(snapshot.next_round_index or 1),
-            focus_for_next_round=(snapshot.focus_for_next_round or "").strip() or None,
+            initial_discussion=snap.discussion,  # type: ignore[arg-type]
+            initial_pipeline=snap.pipeline,
+            start_round=int(snap.next_round_index or 1),
+            focus_for_next_round=(snap.focus_for_next_round or "").strip() or None,
         )
         return await _pause_from_discussion_agents_out(
             settings=settings,
             agents_out=agents_out,
-            openai_user=snapshot.openai_user,
+            openai_user=snap.openai_user,
             on_progress=on_progress,
-            question=snapshot.question,
-            host_plan=snapshot.host_plan,
-            analyst_plan=snapshot.analyst_plan,
-            sub_results=list(snapshot.sub_results),
-            primary_sql=snapshot.generated_sql,
-            primary_exe=snapshot.primary_exe,
+            question=snap.question,
+            host_plan=snap.host_plan,
+            analyst_plan=snap.analyst_plan,
+            sub_results=list(snap.sub_results),
+            primary_sql=snap.generated_sql,
+            primary_exe=snap.primary_exe,
         )
 
     # Should not happen
     agents_done = await run_llm_agents_host_only(
         settings=settings,
-        question=snapshot.question,
-        generated_sql=snapshot.generated_sql,
-        exe=snapshot.primary_exe,
-        deterministic_summary=snapshot.deterministic_summary,
-        sub_results=list(snapshot.sub_results),
-        host_plan=snapshot.host_plan,
-        analyst_plan=snapshot.analyst_plan,
-        discussion=snapshot.discussion,  # type: ignore[arg-type]
-        pipeline=snapshot.pipeline or [],
+        question=snap.question,
+        generated_sql=snap.generated_sql,
+        exe=snap.primary_exe,
+        deterministic_summary=snap.deterministic_summary,
+        sub_results=list(snap.sub_results),
+        host_plan=snap.host_plan,
+        analyst_plan=snap.analyst_plan,
+        discussion=snap.discussion,  # type: ignore[arg-type]
+        pipeline=snap.pipeline or [],
         user_declined_extra_sql=False,
     )
     await _sync_pulsecast_session_after_hitl_answer(
-        openai_user=snapshot.openai_user,
-        question=snapshot.question,
-        host_plan=snapshot.host_plan,
-        analyst_plan=snapshot.analyst_plan,
-        sub_results=list(snapshot.sub_results),
-        primary_sql=snapshot.generated_sql,
-        primary_exe=snapshot.primary_exe,
+        openai_user=snap.openai_user,
+        question=snap.question,
+        host_plan=snap.host_plan,
+        analyst_plan=snap.analyst_plan,
+        sub_results=list(snap.sub_results),
+        primary_sql=snap.generated_sql,
+        primary_exe=snap.primary_exe,
     )
     return CompletionStreamComplete(content=agents_done.answer)
 
@@ -1372,6 +1464,7 @@ async def build_resume_dispatcher(
             settings=settings,
             snapshot=snapshot,
             approved=req.approved,
+            discussion_refinement=req.discussion_refinement,
             on_progress=on_progress,
         )
     return await build_resume_payload(

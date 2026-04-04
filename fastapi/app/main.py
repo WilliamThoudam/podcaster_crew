@@ -1,6 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import logging
+import sys
+
+# Psycopg async needs SelectorEventLoop on Windows. Uvicorn still forces
+# ProactorEventLoop via its own loop factory, so run with:
+#   --loop app.loops:selector_loop_factory
+# or: python -m app   (from the fastapi directory)
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request

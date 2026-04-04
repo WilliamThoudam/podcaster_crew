@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import logging
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -8,7 +11,47 @@ from fastapi.responses import JSONResponse
 from app.config import get_settings
 from app.routers import chat_completions
 
-app = FastAPI(title="Pulsecast API", version="0.1.0")
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    settings = get_settings()
+    db_url = (settings.database_url or "").strip()
+
+    if db_url:
+        from app.services.postgres import get_pool, init_postgres, close_postgres
+        from app.services.pulsecast_session_store import (
+            PostgresSessionStore,
+            set_session_store_impl,
+        )
+        from app.services.pulsecast_resume_store import (
+            PostgresResumeStore,
+            set_resume_store_impl,
+        )
+        from app.graph.pulsecast_graph import reset_compiled_graph
+
+        await init_postgres(db_url)
+        pool = get_pool()
+
+        set_session_store_impl(
+            PostgresSessionStore(pool, ttl_seconds=settings.pulsecast_session_ttl_seconds)
+        )
+        set_resume_store_impl(PostgresResumeStore(pool))
+
+        reset_compiled_graph()
+        logger.info("Postgres persistence enabled (sessions, resume tokens, graph checkpoints)")
+    else:
+        logger.info("DATABASE_URL not set — using in-memory stores (single-process only)")
+
+    yield
+
+    if db_url:
+        from app.services.postgres import close_postgres
+        await close_postgres()
+
+
+app = FastAPI(title="Pulsecast API", version="0.1.0", lifespan=lifespan)
 
 _settings = get_settings()
 _origins = [o.strip() for o in _settings.cors_origins.split(",") if o.strip()]

@@ -152,32 +152,51 @@ async def _node_agents(state: PulsecastState, config: RunnableConfig) -> dict[st
     return {"outcome": out}
 
 
+def _build_workflow() -> StateGraph:
+    workflow = StateGraph(PulsecastState)
+    workflow.add_node("planning", _node_planning)
+    workflow.add_node("sub_questions", _node_sub_questions)
+    workflow.add_node("web_search", _node_web_search)
+    workflow.add_node("agents", _node_agents)
+    workflow.set_entry_point("planning")
+    workflow.add_edge("planning", "sub_questions")
+    workflow.add_conditional_edges(
+        "sub_questions",
+        _route_after_sub_questions,
+        {"end": END, "web_search": "web_search"},
+    )
+    workflow.add_conditional_edges(
+        "web_search",
+        _route_after_web_search,
+        {"end": END, "agents": "agents"},
+    )
+    workflow.add_edge("agents", END)
+    return workflow
+
+
 _compiled_graph: Any = None
 
 
 def _get_compiled_graph() -> Any:
+    """Return the compiled graph, creating it on first call.
+
+    If a PostgresSaver checkpointer has been initialised (via ``init_postgres``),
+    it is attached to the graph so every run is checkpointed by thread_id.
+    """
     global _compiled_graph
     if _compiled_graph is None:
-        workflow = StateGraph(PulsecastState)
-        workflow.add_node("planning", _node_planning)
-        workflow.add_node("sub_questions", _node_sub_questions)
-        workflow.add_node("web_search", _node_web_search)
-        workflow.add_node("agents", _node_agents)
-        workflow.set_entry_point("planning")
-        workflow.add_edge("planning", "sub_questions")
-        workflow.add_conditional_edges(
-            "sub_questions",
-            _route_after_sub_questions,
-            {"end": END, "web_search": "web_search"},
-        )
-        workflow.add_conditional_edges(
-            "web_search",
-            _route_after_web_search,
-            {"end": END, "agents": "agents"},
-        )
-        workflow.add_edge("agents", END)
-        _compiled_graph = workflow.compile()
+        from app.services.postgres import get_checkpointer
+
+        checkpointer = get_checkpointer()
+        workflow = _build_workflow()
+        _compiled_graph = workflow.compile(checkpointer=checkpointer)
     return _compiled_graph
+
+
+def reset_compiled_graph() -> None:
+    """Force recompilation (e.g. after the checkpointer is initialised at startup)."""
+    global _compiled_graph
+    _compiled_graph = None
 
 
 async def run_pulsecast_completion_graph(
@@ -192,18 +211,19 @@ async def run_pulsecast_completion_graph(
     async def persist_pulsecast_session(session: PulsecastSession) -> None:
         await pulsecast_session_store.save(session)
 
-    final = await graph.ainvoke(
-        {},
-        config={
-            "configurable": {
-                "settings": settings,
-                "req": req,
-                "on_progress": on_progress,
-                "session_id": sid if sid else None,
-                "persist_pulsecast_session": persist_pulsecast_session if sid else None,
-            },
+    config: dict[str, Any] = {
+        "configurable": {
+            "settings": settings,
+            "req": req,
+            "on_progress": on_progress,
+            "session_id": sid if sid else None,
+            "persist_pulsecast_session": persist_pulsecast_session if sid else None,
         },
-    )
+    }
+    if sid:
+        config["configurable"]["thread_id"] = sid
+
+    final = await graph.ainvoke({}, config=config)
     out = final.get("outcome")
     if out is None:
         raise RuntimeError("Pulsecast graph finished without an outcome")

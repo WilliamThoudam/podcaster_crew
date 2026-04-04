@@ -453,7 +453,7 @@ async def run_sub_questions_slice(
                 primary_exe=primary_exe,
                 openai_user=req.user,
             )
-            token = resume_store.issue_token(snap)
+            token = await resume_store.issue_token(snap)
             await emit_progress(
                 on_progress,
                 {
@@ -763,7 +763,7 @@ async def phase_agents_finalize(
             rationale=agents_out.rationale,
             openai_user=req.user,
         )
-        token = resume_store.issue_token(snap)
+        token = await resume_store.issue_token(snap)
         n = len(agents_out.search_queries)
         step = agents_out.pending_search_index + 1
         await emit_progress(
@@ -798,7 +798,7 @@ async def phase_agents_finalize(
             rationale=agents_out.rationale,
             openai_user=req.user,
         )
-        token = resume_store.issue_token(snap)
+        token = await resume_store.issue_token(snap)
         await emit_progress(
             on_progress,
             {
@@ -833,7 +833,7 @@ async def phase_agents_finalize(
             focus_for_next_round=agents_out.focus_for_next_round,
             openai_user=req.user,
         )
-        token = resume_store.issue_token(snap)
+        token = await resume_store.issue_token(snap)
         if agents_out.stage == "pre":
             prompt = "Start 1-round panel" if agents_out.requested_depth == "linear" else "Start multi-round panel"
         else:
@@ -916,7 +916,7 @@ async def phase_web_search_hitl(
         rationale="Planned web evidence steps from analyst_plan.web_sub_questions.",
         openai_user=req.user,
     )
-    token = resume_store.issue_token(snap)
+    token = await resume_store.issue_token(snap)
     await emit_progress(
         on_progress,
         {

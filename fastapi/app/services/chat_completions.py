@@ -708,7 +708,7 @@ async def _pause_from_discussion_agents_out(
             rationale=agents_out.rationale,
             openai_user=openai_user,
         )
-        token_ws = resume_store.issue_token(snap_ws)
+        token_ws = await resume_store.issue_token(snap_ws)
         await emit_progress(
             on_progress,
             {
@@ -742,7 +742,7 @@ async def _pause_from_discussion_agents_out(
             rationale=agents_out.rationale,
             openai_user=openai_user,
         )
-        token = resume_store.issue_token(snap)
+        token = await resume_store.issue_token(snap)
         await emit_progress(
             on_progress,
             {
@@ -778,7 +778,7 @@ async def _pause_from_discussion_agents_out(
             focus_for_next_round=agents_out.focus_for_next_round,
             openai_user=openai_user,
         )
-        token_d = resume_store.issue_token(snap_d)
+        token_d = await resume_store.issue_token(snap_d)
         await emit_progress(
             on_progress,
             {
@@ -1195,7 +1195,7 @@ async def build_resume_web_search_payload(
                 rationale=snapshot.rationale,
                 openai_user=snapshot.openai_user,
             )
-            token_ws = resume_store.issue_token(snap_ws)
+            token_ws = await resume_store.issue_token(snap_ws)
             await emit_progress(
                 on_progress,
                 {
@@ -1270,7 +1270,7 @@ async def build_resume_web_search_payload(
             rationale=agents_out.rationale,
             openai_user=snapshot.openai_user,
         )
-        token_ws = resume_store.issue_token(snap_ws)
+        token_ws = await resume_store.issue_token(snap_ws)
         await emit_progress(
             on_progress,
             {
@@ -1303,7 +1303,7 @@ async def build_resume_web_search_payload(
             rationale=agents_out.rationale,
             openai_user=snapshot.openai_user,
         )
-        token = resume_store.issue_token(snap2)
+        token = await resume_store.issue_token(snap2)
         await emit_progress(
             on_progress,
             {

@@ -1,15 +1,24 @@
-"""In-memory Pulsecast session (checkpointed pipeline state per OpenAI `user` / client session_id).
+"""Pulsecast session store — checkpointed pipeline state per session_id.
 
-Single-process until a Redis-backed SessionStore replaces InMemorySessionStore.
+Supports two backends:
+- ``InMemorySessionStore`` (default, single-process)
+- ``PostgresSessionStore`` (durable, multi-worker)
+
+The module-level ``pulsecast_session_store`` is a proxy that starts with the
+in-memory backend and can be swapped to Postgres at startup via
+``set_session_store_impl``.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import time
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
+from psycopg_pool import AsyncConnectionPool
 
 from app.config import get_settings
 from app.models.schemas import (
@@ -18,6 +27,8 @@ from app.models.schemas import (
     PlanningHostOutput,
     SubResult,
 )
+
+logger = logging.getLogger(__name__)
 
 PulsecastSessionPhase = Literal[
     "idle",
@@ -29,7 +40,7 @@ PulsecastSessionPhase = Literal[
 
 
 class PulsecastSession(BaseModel):
-    """Server-side thread state for merge + refine; JSON-serializable for future Redis."""
+    """Server-side thread state for merge + refine; JSON-serializable."""
 
     model_config = {"extra": "ignore"}
 
@@ -72,6 +83,10 @@ class SessionStore(Protocol):
     async def delete(self, session_id: str) -> None: ...
 
 
+# ---------------------------------------------------------------------------
+# In-memory backend (original, single-process)
+# ---------------------------------------------------------------------------
+
 class InMemorySessionStore:
     """TTL map session_id -> PulsecastSession (one async worker / process)."""
 
@@ -110,5 +125,82 @@ class InMemorySessionStore:
             self._entries.pop(session_id, None)
 
 
-# Module singleton; replace with Redis-backed store in multi-worker deployments.
-pulsecast_session_store = InMemorySessionStore()
+# ---------------------------------------------------------------------------
+# PostgreSQL backend (durable, multi-worker)
+# ---------------------------------------------------------------------------
+
+class PostgresSessionStore:
+    """Postgres-backed session store using the ``pulsecast_sessions`` table."""
+
+    def __init__(self, pool: AsyncConnectionPool, ttl_seconds: float | None = None) -> None:
+        self._pool = pool
+        self._ttl = ttl_seconds or float(get_settings().pulsecast_session_ttl_seconds)
+
+    async def get(self, session_id: str) -> PulsecastSession | None:
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT data FROM pulsecast_sessions "
+                "WHERE session_id = %s AND expires_at > NOW()",
+                (session_id,),
+            )
+            row = await cur.fetchone()
+            if row is None:
+                return None
+            return PulsecastSession.model_validate(row[0])
+
+    async def save(self, session: PulsecastSession) -> None:
+        data_json = json.dumps(session.model_dump(mode="json"))
+        async with self._pool.connection() as conn:
+            await conn.execute(
+                """
+                INSERT INTO pulsecast_sessions (session_id, data, updated_at, expires_at)
+                VALUES (%s, %s::jsonb, NOW(), NOW() + (%s::double precision * interval '1 second'))
+                ON CONFLICT (session_id) DO UPDATE SET
+                    data = EXCLUDED.data,
+                    updated_at = NOW(),
+                    expires_at = EXCLUDED.expires_at
+                """,
+                (session.session_id, data_json, self._ttl),
+            )
+            await conn.commit()
+
+    async def delete(self, session_id: str) -> None:
+        async with self._pool.connection() as conn:
+            await conn.execute(
+                "DELETE FROM pulsecast_sessions WHERE session_id = %s",
+                (session_id,),
+            )
+            await conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Proxy: swappable singleton that all other modules import
+# ---------------------------------------------------------------------------
+
+class _SessionStoreProxy:
+    """Thin proxy so the module-level ``pulsecast_session_store`` reference stays
+    valid even after the backend is swapped from in-memory to Postgres at startup."""
+
+    def __init__(self) -> None:
+        self._impl: SessionStore = InMemorySessionStore()
+
+    def set_impl(self, impl: SessionStore) -> None:
+        self._impl = impl
+        logger.info("Session store backend switched to %s", type(impl).__name__)
+
+    async def get(self, session_id: str) -> PulsecastSession | None:
+        return await self._impl.get(session_id)
+
+    async def save(self, session: PulsecastSession) -> None:
+        return await self._impl.save(session)
+
+    async def delete(self, session_id: str) -> None:
+        return await self._impl.delete(session_id)
+
+
+pulsecast_session_store = _SessionStoreProxy()
+
+
+def set_session_store_impl(impl: SessionStore) -> None:
+    """Called at app startup to swap the backend (e.g. to PostgresSessionStore)."""
+    pulsecast_session_store.set_impl(impl)

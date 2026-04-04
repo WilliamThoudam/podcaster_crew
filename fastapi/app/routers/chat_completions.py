@@ -90,7 +90,7 @@ async def chat_completions_resume(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="stream must be true for this service",
         )
-    snapshot = resume_store.pop(body.resume_token)
+    snapshot = await resume_store.pop(body.resume_token)
     if snapshot is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

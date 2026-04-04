@@ -1,9 +1,23 @@
+"""Pulsecast resume-token store — paused snapshot persistence for HITL.
+
+Supports two backends:
+- ``InMemoryResumeStore`` (default, single-process)
+- ``PostgresResumeStore`` (durable, multi-worker)
+
+All public methods are **async**.  The module-level ``resume_store`` is a proxy
+whose backend can be swapped at startup via ``set_resume_store_impl``.
+"""
+
 from __future__ import annotations
 
+import json
+import logging
 import secrets
 import time
 from dataclasses import dataclass
 from typing import Any, Literal, Union
+
+from psycopg_pool import AsyncConnectionPool
 
 from app.models.schemas import (
     AgentPipelineStep,
@@ -18,12 +32,13 @@ from app.services.pulsecast_llm_agents import (
     _AgentOut,
 )
 
+logger = logging.getLogger(__name__)
+
 PauseKindChallenger = Literal["challenger_followup"]
 PauseKindDuplicate = Literal["duplicate_sub_question"]
 PauseKindWebSearch = Literal["web_search"]
 PauseKindDiscussion = Literal["discussion"]
 
-# Union of snapshots stored under a resume_token (Challenger HITL vs duplicate-SQL vs web search HITL).
 PulsecastPausedSnapshotUnion = Union[
     "PulsecastPausedSnapshot",
     "DuplicateSubQuestionPausedSnapshot",
@@ -31,6 +46,10 @@ PulsecastPausedSnapshotUnion = Union[
     "DiscussionPausedSnapshot",
 ]
 
+
+# ---------------------------------------------------------------------------
+# Snapshot dataclasses (unchanged from original)
+# ---------------------------------------------------------------------------
 
 @dataclass
 class DuplicateSubQuestionPausedSnapshot:
@@ -155,12 +174,7 @@ class PulsecastPausedSnapshot:
 
 @dataclass
 class WebSearchPausedSnapshot:
-    """Resume after web_search_approval_required (HITL).
-
-    Two stages:
-    - stage="pre": pause happens BEFORE any agent discussion starts (Option A web_search phase).
-    - stage="mid": pause happens DURING agent discussion (existing WEB_CRAWLER behavior).
-    """
+    """Resume after web_search_approval_required (HITL)."""
 
     question: str
     generated_sql: str
@@ -178,7 +192,6 @@ class WebSearchPausedSnapshot:
 
     stage: Literal["pre", "mid"] = "mid"
 
-    # stage="pre" has no agent discussion yet; keep optional.
     pipeline: list[AgentPipelineStep] | None = None
     discussion: DiscussionState | None = None
 
@@ -257,14 +270,8 @@ class WebSearchPausedSnapshot:
 
 @dataclass
 class DiscussionPausedSnapshot:
-    """Resume after discussion_approval_required (HITL).
+    """Resume after discussion_approval_required (HITL)."""
 
-    Two stages:
-    - stage="pre": pause happens BEFORE moderated discussion starts.
-    - stage="mid": pause happens BETWEEN rounds in moderated discussion.
-    """
-
-    # Common context
     question: str
     generated_sql: str
     primary_exe: ExecuteSqlResponse
@@ -274,7 +281,6 @@ class DiscussionPausedSnapshot:
     analyst_plan: PlanningAnalystOutput
     openai_user: str | None
 
-    # Discussion control
     stage: Literal["pre", "mid"] = "pre"
     requested_depth: Literal["linear", "moderated"] = "moderated"
     max_rounds: int = 3
@@ -282,7 +288,6 @@ class DiscussionPausedSnapshot:
     focus_for_next_round: str | None = None
     rationale: str | None = None
 
-    # stage="mid" needs transcript + pipeline; stage="pre" keeps optional.
     pipeline: list[AgentPipelineStep] | None = None
     discussion: DiscussionState | None = None
 
@@ -364,7 +369,11 @@ def deserialize_paused_snapshot(d: dict[str, Any]) -> PulsecastPausedSnapshotUni
     return PulsecastPausedSnapshot.from_json_dict(d)
 
 
-class PulsecastResumeStore:
+# ---------------------------------------------------------------------------
+# In-memory backend (original)
+# ---------------------------------------------------------------------------
+
+class InMemoryResumeStore:
     """In-memory TTL map: resume_token -> serialized paused snapshot."""
 
     def __init__(self, ttl_seconds: float = 3600.0) -> None:
@@ -377,13 +386,13 @@ class PulsecastResumeStore:
         for k in dead:
             del self._entries[k]
 
-    def issue_token(self, snapshot: PulsecastPausedSnapshotUnion) -> str:
+    async def issue_token(self, snapshot: PulsecastPausedSnapshotUnion) -> str:
         self._purge_expired()
         token = secrets.token_urlsafe(32)
         self._entries[token] = (time.monotonic() + self._ttl, snapshot.to_json_dict())
         return token
 
-    def pop(self, token: str) -> PulsecastPausedSnapshotUnion | None:
+    async def pop(self, token: str) -> PulsecastPausedSnapshotUnion | None:
         self._purge_expired()
         item = self._entries.pop(token, None)
         if item is None:
@@ -397,4 +406,75 @@ class PulsecastResumeStore:
             return None
 
 
-resume_store = PulsecastResumeStore()
+# ---------------------------------------------------------------------------
+# PostgreSQL backend (durable)
+# ---------------------------------------------------------------------------
+
+class PostgresResumeStore:
+    """Postgres-backed resume store using the ``pulsecast_resume_tokens`` table."""
+
+    def __init__(self, pool: AsyncConnectionPool, ttl_seconds: float = 3600.0) -> None:
+        self._pool = pool
+        self._ttl = ttl_seconds
+
+    async def issue_token(self, snapshot: PulsecastPausedSnapshotUnion) -> str:
+        token = secrets.token_urlsafe(32)
+        payload = json.dumps(snapshot.to_json_dict())
+        pause_kind = getattr(snapshot, "pause_kind", "")
+        async with self._pool.connection() as conn:
+            await conn.execute(
+                """
+                INSERT INTO pulsecast_resume_tokens (token, pause_kind, snapshot, created_at, expires_at)
+                VALUES (%s, %s, %s::jsonb, NOW(), NOW() + (%s::double precision * interval '1 second'))
+                """,
+                (token, pause_kind, payload, self._ttl),
+            )
+            await conn.commit()
+        return token
+
+    async def pop(self, token: str) -> PulsecastPausedSnapshotUnion | None:
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                "DELETE FROM pulsecast_resume_tokens "
+                "WHERE token = %s AND expires_at > NOW() "
+                "RETURNING snapshot",
+                (token,),
+            )
+            row = await cur.fetchone()
+            await conn.commit()
+        if row is None:
+            return None
+        try:
+            return deserialize_paused_snapshot(row[0])
+        except (KeyError, ValueError, TypeError):
+            return None
+
+
+# ---------------------------------------------------------------------------
+# Proxy: swappable singleton
+# ---------------------------------------------------------------------------
+
+class _ResumeStoreProxy:
+    """Thin proxy so the module-level ``resume_store`` reference stays valid
+    even after the backend is swapped at startup."""
+
+    def __init__(self) -> None:
+        self._impl: InMemoryResumeStore | PostgresResumeStore = InMemoryResumeStore()
+
+    def set_impl(self, impl: InMemoryResumeStore | PostgresResumeStore) -> None:
+        self._impl = impl
+        logger.info("Resume store backend switched to %s", type(impl).__name__)
+
+    async def issue_token(self, snapshot: PulsecastPausedSnapshotUnion) -> str:
+        return await self._impl.issue_token(snapshot)
+
+    async def pop(self, token: str) -> PulsecastPausedSnapshotUnion | None:
+        return await self._impl.pop(token)
+
+
+resume_store = _ResumeStoreProxy()
+
+
+def set_resume_store_impl(impl: InMemoryResumeStore | PostgresResumeStore) -> None:
+    """Called at app startup to swap the backend."""
+    resume_store.set_impl(impl)

@@ -26,6 +26,7 @@ from app.services.pulsecast_completion_types import (
     ProgressCallback,
 )
 from app.services.pulsecast_llm_agents import (
+    LlmAgentsComplete,
     LlmAgentsPaused,
     LlmAgentsPausedWebSearch,
     LlmAgentsPausedDiscussion,
@@ -857,6 +858,21 @@ async def phase_agents_finalize(
             proposed_sub_question=prompt,
             rationale=agents_out.rationale,
         )
+    if isinstance(agents_out, LlmAgentsComplete) and agents_out.discussion is not None:
+        sid = (req.user or "").strip()
+        if sid:
+            prev = await pulsecast_session_store.get(sid)
+            if prev is not None:
+                disc = agents_out.discussion
+                disc_json: dict[str, Any] = {
+                    "analyst": disc.analyst.model_dump(mode="json"),
+                    "discussion_turns": [t.model_dump(mode="json") for t in disc.turns],
+                }
+                pipe_json = [p.model_dump(mode="json") for p in agents_out.pipeline]
+                await pulsecast_session_store.save(
+                    prev.model_copy(update={"last_discussion": disc_json, "last_pipeline": pipe_json})
+                )
+
     await emit_progress(on_progress, {"type": "summarizing_started"})
     await emit_text_chunks(
         on_progress=on_progress,

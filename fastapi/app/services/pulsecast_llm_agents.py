@@ -581,6 +581,18 @@ def _host_user_prompt(*, ctx: dict[str, Any], discussion: DiscussionState) -> st
     )
 
 
+def _host_final_answer_with_canonical(*, canonical_question: str, host_body: str) -> str:
+    """Prepend merged canonical question to the HOST answer shown in the UI."""
+    q = (canonical_question or "").strip()
+    body_stripped = (host_body or "").strip()
+    if not q:
+        return body_stripped if body_stripped else (host_body or "")
+    header = f"**Question addressed:** {q}"
+    if not body_stripped:
+        return header
+    return f"{header}\n\n{body_stripped}"
+
+
 def _agent_id(role: PulsecastRole) -> PulsecastAgentId:
     return {
         "HOST": "host",
@@ -863,6 +875,7 @@ class LlmAgentsComplete:
     answer: str
     pipeline: list[AgentPipelineStep]
     messages: list[AgentInsight]
+    discussion: DiscussionState | None = None
 
 
 @dataclass
@@ -985,7 +998,16 @@ async def _run_llm_agents_minimal(
             detail=host_out.detail,
         )
     )
-    return LlmAgentsComplete(answer=host_out.text, pipeline=pipeline, messages=[AgentInsight(role="HOST", text=host_out.text)])
+    final_text = _host_final_answer_with_canonical(
+        canonical_question=str(ctx.get("question") or ""),
+        host_body=host_out.text,
+    )
+    return LlmAgentsComplete(
+        answer=final_text,
+        pipeline=pipeline,
+        messages=[AgentInsight(role="HOST", text=final_text)],
+        discussion=discussion,
+    )
 
 
 async def _run_llm_agents_linear(
@@ -1113,7 +1135,16 @@ async def _run_llm_agents_linear(
             detail=host_out.detail,
         )
     )
-    return LlmAgentsComplete(answer=host_out.text, pipeline=pipeline, messages=[AgentInsight(role="HOST", text=host_out.text)])
+    final_text = _host_final_answer_with_canonical(
+        canonical_question=question,
+        host_body=host_out.text,
+    )
+    return LlmAgentsComplete(
+        answer=final_text,
+        pipeline=pipeline,
+        messages=[AgentInsight(role="HOST", text=final_text)],
+        discussion=discussion,
+    )
 
 
 async def _run_llm_agents_moderated_discussion(
@@ -1327,7 +1358,16 @@ async def _run_llm_agents_moderated_discussion(
             detail=host_out.detail,
         )
     )
-    return LlmAgentsComplete(answer=host_out.text, pipeline=pipeline, messages=[AgentInsight(role="HOST", text=host_out.text)])
+    final_text = _host_final_answer_with_canonical(
+        canonical_question=question,
+        host_body=host_out.text,
+    )
+    return LlmAgentsComplete(
+        answer=final_text,
+        pipeline=pipeline,
+        messages=[AgentInsight(role="HOST", text=final_text)],
+        discussion=discussion,
+    )
 
 
 async def run_llm_agents(
@@ -1524,10 +1564,15 @@ async def run_llm_agents_host_only(
             detail=host_out.detail,
         ),
     ]
+    final_text = _host_final_answer_with_canonical(
+        canonical_question=question,
+        host_body=host_out.text,
+    )
     return LlmAgentsComplete(
-        answer=host_out.text,
+        answer=final_text,
         pipeline=pipeline_out,
-        messages=[AgentInsight(role="HOST", text=host_out.text)],
+        messages=[AgentInsight(role="HOST", text=final_text)],
+        discussion=discussion,
     )
 
 
@@ -1725,8 +1770,13 @@ async def run_llm_agents_after_web_hitl(
             detail=host_out.detail,
         )
     )
+    final_text = _host_final_answer_with_canonical(
+        canonical_question=question,
+        host_body=host_out.text,
+    )
     return LlmAgentsComplete(
-        answer=host_out.text,
+        answer=final_text,
         pipeline=pipeline_out,
-        messages=[AgentInsight(role="HOST", text=host_out.text)],
+        messages=[AgentInsight(role="HOST", text=final_text)],
+        discussion=discussion_final,
     )

@@ -13,7 +13,6 @@ From this directory:
 python -m venv .venv
 .venv\Scripts\activate   # Windows
 pip install -e .
-pip install -e ".[dev]"   # optional: pytest for `pytest` in `tests/`
 ```
 
 Optional: copy or symlink the repo root `.env` here, or set variables in your environment. Supported settings (see `app/config.py`):

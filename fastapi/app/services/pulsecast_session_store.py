@@ -57,6 +57,9 @@ class PulsecastSession(BaseModel):
     completed_phase: PulsecastSessionPhase = "idle"
     expires_at_monotonic: float = 0.0
 
+    last_discussion: dict[str, Any] | None = None
+    last_pipeline: list[dict[str, Any]] | None = None
+
     def touch_expiry(self, ttl_seconds: float) -> None:
         self.expires_at_monotonic = time.monotonic() + ttl_seconds
 

@@ -18,6 +18,7 @@ from app.config import Settings
 from app.errors import UpstreamServiceError
 from app.graph.pulsecast_graph import run_pulsecast_completion_graph
 from app.models.schemas import (
+    AgentPipelineStep,
     ExecuteSqlResponse,
     OpenAIChatCompletionChunk,
     OpenAIChatCompletionChunkChoice,
@@ -53,8 +54,13 @@ from app.services.pulsecast_completion_types import (
     ProgressCallback,
 )
 from app.services.pulsecast_llm_agents import (
+    DiscussionState,
+    DiscussionTurn,
+    LlmAgentsComplete,
     LlmAgentsPaused,
     LlmAgentsPausedWebSearch,
+    _AgentOut,
+    _context_blob_compact,
     run_llm_agents_after_web_hitl,
     run_llm_agents_host_only,
     run_llm_agents_minimal_only,
@@ -263,6 +269,72 @@ async def build_refine_payload(
                 }
             )
         )
+
+        saved_disc = stored.last_discussion
+        saved_pipe = stored.last_pipeline
+        has_prior_discussion = (
+            saved_disc is not None
+            and "analyst" in saved_disc
+            and "discussion_turns" in saved_disc
+        )
+
+        if has_prior_discussion:
+            prior_analyst = _AgentOut.model_validate(saved_disc["analyst"])
+            prior_turns = [DiscussionTurn.model_validate(x) for x in saved_disc["discussion_turns"]]
+            prior_discussion = DiscussionState(analyst=prior_analyst, turns=prior_turns)
+            prior_pipeline = (
+                [AgentPipelineStep.model_validate(x) for x in saved_pipe]
+                if saved_pipe else []
+            )
+            max_completed_round = max((t.round_index for t in prior_turns), default=0)
+            continuation_round = max_completed_round + 1
+
+            deterministic = build_answer_summary(primary_exe)
+            ctx = _context_blob_compact(
+                question=merged_q,
+                generated_sql=primary_sql,
+                exe=primary_exe,
+                deterministic_summary=deterministic,
+                sub_results=sub_results,
+                host_plan=host_plan,
+                analyst_plan=analyst_plan,
+                settings=settings,
+            )
+            if completed_web_results:
+                ctx["web_search_results"] = completed_web_results
+            if user_declined_web_search:
+                ctx["user_declined_web_search"] = True
+
+            agents_out = await _run_llm_agents_moderated_discussion(
+                settings=settings,
+                question=merged_q,
+                generated_sql=primary_sql,
+                exe=primary_exe,
+                deterministic_summary=deterministic,
+                sr_list=sub_results,
+                host_plan=host_plan,
+                analyst_plan=analyst_plan,
+                ctx=ctx,
+                allow_sql_approval_pause=True,
+                max_rounds=continuation_round,
+                on_progress=on_progress,
+                initial_discussion=prior_discussion,
+                initial_pipeline=prior_pipeline,
+                start_round=continuation_round,
+                focus_for_next_round=body.refinement.strip(),
+            )
+            return await _pause_from_discussion_agents_out(
+                settings=settings,
+                agents_out=agents_out,
+                openai_user=sid,
+                on_progress=on_progress,
+                question=merged_q,
+                host_plan=host_plan,
+                analyst_plan=analyst_plan,
+                sub_results=sub_results,
+                primary_sql=primary_sql,
+                primary_exe=primary_exe,
+            )
 
         agents_out = await phase_agents_finalize(
             settings=settings,
@@ -754,8 +826,6 @@ async def _pause_from_discussion_agents_out(
     primary_sql: str,
     primary_exe: ExecuteSqlResponse,
 ) -> CompletionStreamOutcome:
-    from app.services.pulsecast_llm_agents import LlmAgentsComplete, LlmAgentsPausedDiscussion
-
     if isinstance(agents_out, LlmAgentsComplete):
         await _sync_pulsecast_session_after_hitl_answer(
             openai_user=openai_user,
@@ -766,6 +836,19 @@ async def _pause_from_discussion_agents_out(
             primary_sql=primary_sql,
             primary_exe=primary_exe,
         )
+        sid = (openai_user or "").strip()
+        if sid and agents_out.discussion is not None:
+            prev = await pulsecast_session_store.get(sid)
+            if prev is not None:
+                disc = agents_out.discussion
+                disc_json: dict[str, Any] = {
+                    "analyst": disc.analyst.model_dump(mode="json"),
+                    "discussion_turns": [t.model_dump(mode="json") for t in disc.turns],
+                }
+                pipe_json = [p.model_dump(mode="json") for p in agents_out.pipeline]
+                await pulsecast_session_store.save(
+                    prev.model_copy(update={"last_discussion": disc_json, "last_pipeline": pipe_json})
+                )
         return CompletionStreamComplete(content=agents_out.answer)
 
     if isinstance(agents_out, LlmAgentsPausedWebSearch):

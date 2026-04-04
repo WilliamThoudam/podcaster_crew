@@ -717,35 +717,13 @@ async def phase_sub_questions(
     )
 
 
-async def phase_agents_finalize(
+async def stream_outcome_from_llm_agents_result(
     *,
-    settings: Settings,
+    agents_out: LlmAgentsComplete | LlmAgentsPaused | LlmAgentsPausedWebSearch | LlmAgentsPausedDiscussion,
     req: OpenAIChatCompletionRequest,
-    question: str,
-    host_plan: PlanningHostOutput,
-    analyst_plan: PlanningAnalystOutput,
-    primary_sql: str,
-    primary_exe: ExecuteSqlResponse,
-    sub_results: list[SubResult],
-    completed_web_results: list[dict[str, Any]] | None = None,
-    user_declined_web_search: bool = False,
     on_progress: ProgressCallback | None,
 ) -> CompletionStreamOutcome:
-    deterministic = build_answer_summary(primary_exe)
-    agents_out = await run_llm_agents(
-        settings=settings,
-        question=question,
-        generated_sql=primary_sql,
-        exe=primary_exe,
-        deterministic_summary=deterministic,
-        sub_results=sub_results,
-        host_plan=host_plan,
-        analyst_plan=analyst_plan,
-        completed_web_results=completed_web_results,
-        user_declined_web_search=user_declined_web_search,
-        on_progress=on_progress,
-        checkpoint_session_id=(req.user or "").strip() or None,
-    )
+    """Map an LLM agents phase result to a stream outcome (tokens, SSE, summarizing)."""
     if isinstance(agents_out, LlmAgentsPausedWebSearch):
         snap = WebSearchPausedSnapshot(
             stage="mid",
@@ -859,7 +837,9 @@ async def phase_agents_finalize(
             proposed_sub_question=prompt,
             rationale=agents_out.rationale,
         )
-    if isinstance(agents_out, LlmAgentsComplete) and agents_out.discussion is not None:
+    if not isinstance(agents_out, LlmAgentsComplete):
+        raise TypeError(f"Unexpected agents phase result type: {type(agents_out)!r}")
+    if agents_out.discussion is not None:
         sid = (req.user or "").strip()
         if sid:
             prev = await pulsecast_session_store.get(sid)
@@ -885,6 +865,42 @@ async def phase_agents_finalize(
     )
     await emit_progress(on_progress, {"type": "summarizing_done"})
     return CompletionStreamComplete(content=agents_out.answer)
+
+
+async def phase_agents_finalize(
+    *,
+    settings: Settings,
+    req: OpenAIChatCompletionRequest,
+    question: str,
+    host_plan: PlanningHostOutput,
+    analyst_plan: PlanningAnalystOutput,
+    primary_sql: str,
+    primary_exe: ExecuteSqlResponse,
+    sub_results: list[SubResult],
+    completed_web_results: list[dict[str, Any]] | None = None,
+    user_declined_web_search: bool = False,
+    on_progress: ProgressCallback | None,
+) -> CompletionStreamOutcome:
+    deterministic = build_answer_summary(primary_exe)
+    agents_out = await run_llm_agents(
+        settings=settings,
+        question=question,
+        generated_sql=primary_sql,
+        exe=primary_exe,
+        deterministic_summary=deterministic,
+        sub_results=sub_results,
+        host_plan=host_plan,
+        analyst_plan=analyst_plan,
+        completed_web_results=completed_web_results,
+        user_declined_web_search=user_declined_web_search,
+        on_progress=on_progress,
+        checkpoint_session_id=(req.user or "").strip() or None,
+    )
+    return await stream_outcome_from_llm_agents_result(
+        agents_out=agents_out,
+        req=req,
+        on_progress=on_progress,
+    )
 
 
 async def phase_web_search_hitl(

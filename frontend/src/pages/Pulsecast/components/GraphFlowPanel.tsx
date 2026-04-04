@@ -14,6 +14,8 @@ import type { GraphNodeStatus } from '../hooks/useGraphVisualization'
 const nodeTypes = {
   graphNode: GraphNodeComponent,
   graphTerminal: GraphNodeComponent,
+  graphAgent: GraphNodeComponent,
+  graphGate: GraphNodeComponent,
 } as const
 
 interface GraphFlowPanelProps {

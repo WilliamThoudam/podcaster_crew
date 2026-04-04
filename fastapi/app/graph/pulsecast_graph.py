@@ -4,19 +4,13 @@ from typing import Any
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, StateGraph
-from typing_extensions import TypedDict
 
 from app.config import Settings
-from app.models.schemas import (
-    ExecuteSqlResponse,
-    OpenAIChatCompletionRequest,
-    PlanningAnalystOutput,
-    PlanningHostOutput,
-    SubResult,
-)
+from app.graph.agents_subgraph import build_agents_subgraph
+from app.graph.pulsecast_state import PulsecastState
+from app.models.schemas import OpenAIChatCompletionRequest
 from app.services.pulsecast_completion_steps import (
     collect_user_queries,
-    phase_agents_finalize,
     phase_planning,
     phase_sub_questions,
     phase_web_search_hitl,
@@ -29,19 +23,15 @@ from app.services.pulsecast_completion_types import (
 from app.services.pulsecast_session_store import PulsecastSession, pulsecast_session_store
 from app.services.pulsecast_sse_emit import emit_progress
 
-_GRAPH_NODE_NAMES = frozenset({"planning", "sub_questions", "web_search", "agents"})
+_OUTER_GRAPH_NODES = frozenset({"planning", "sub_questions", "web_search", "agents"})
 
 
-class PulsecastState(TypedDict, total=False):
-    question: str
-    host_plan: PlanningHostOutput
-    analyst_plan: PlanningAnalystOutput
-    sub_results: list[SubResult]
-    primary_sql: str
-    primary_exe: ExecuteSqlResponse
-    completed_web_results: list[dict[str, Any]]
-    user_declined_web_search: bool
-    outcome: CompletionStreamOutcome
+def _is_tracked_graph_node(name: str) -> bool:
+    if name in _OUTER_GRAPH_NODES:
+        return True
+    if name.startswith("agents:") and not name.endswith(":__end__"):
+        return True
+    return False
 
 
 async def _node_planning(state: PulsecastState, config: RunnableConfig) -> dict[str, Any]:
@@ -131,36 +121,13 @@ def _route_after_sub_questions(state: PulsecastState) -> str:
     return "web_search"
 
 
-async def _node_agents(state: PulsecastState, config: RunnableConfig) -> dict[str, Any]:
-    c = config["configurable"]
-    out = await phase_agents_finalize(
-        settings=c["settings"],
-        req=c["req"],
-        question=state["question"],
-        host_plan=state["host_plan"],
-        analyst_plan=state["analyst_plan"],
-        primary_sql=state["primary_sql"],
-        primary_exe=state["primary_exe"],
-        sub_results=state["sub_results"],
-        completed_web_results=state.get("completed_web_results"),
-        user_declined_web_search=bool(state.get("user_declined_web_search", False)),
-        on_progress=c.get("on_progress"),
-    )
-    sid = (c.get("session_id") or "").strip()
-    persist = c.get("persist_pulsecast_session")
-    if sid and persist and isinstance(out, CompletionStreamComplete):
-        prev = await pulsecast_session_store.get(sid)
-        if prev is not None:
-            await persist(prev.model_copy(update={"completed_phase": "after_agents"}))
-    return {"outcome": out}
-
-
 def _build_workflow() -> StateGraph:
+    agents_compiled = build_agents_subgraph().compile()
     workflow = StateGraph(PulsecastState)
     workflow.add_node("planning", _node_planning)
     workflow.add_node("sub_questions", _node_sub_questions)
     workflow.add_node("web_search", _node_web_search)
-    workflow.add_node("agents", _node_agents)
+    workflow.add_node("agents", agents_compiled)
     workflow.set_entry_point("planning")
     workflow.add_edge("planning", "sub_questions")
     workflow.add_conditional_edges(
@@ -231,12 +198,12 @@ async def run_pulsecast_completion_graph(
         kind = event["event"]
         name = event.get("name", "")
 
-        if kind == "on_chain_start" and name in _GRAPH_NODE_NAMES:
+        if kind == "on_chain_start" and _is_tracked_graph_node(name):
             await emit_progress(on_progress, {
                 "type": "graph_node_entered",
                 "node": name,
             })
-        elif kind == "on_chain_end" and name in _GRAPH_NODE_NAMES:
+        elif kind == "on_chain_end" and _is_tracked_graph_node(name):
             await emit_progress(on_progress, {
                 "type": "graph_node_exited",
                 "node": name,
@@ -248,4 +215,11 @@ async def run_pulsecast_completion_graph(
     out = final_state.get("outcome")
     if out is None:
         raise RuntimeError("Pulsecast graph finished without an outcome")
+
+    persist = config["configurable"].get("persist_pulsecast_session")
+    if sid and persist and isinstance(out, CompletionStreamComplete):
+        prev = await pulsecast_session_store.get(sid)
+        if prev is not None:
+            await persist(prev.model_copy(update={"completed_phase": "after_agents"}))
+
     return out

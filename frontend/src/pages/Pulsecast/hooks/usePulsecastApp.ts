@@ -895,7 +895,7 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
         const resumeDiscussionWithRefinement = discussionHitlOpen && Boolean(discToken)
         const sqlToken = sqlHitlToken
         const resumeSqlWithChatRefinement = sqlHitlOpen && Boolean(sqlToken)
-        if (resumeDiscussionWithRefinement) {
+        if (resumeDiscussionWithRefinement && discToken) {
           setDiscussionHitlOpen(false)
           result = await streamPulsecastResume(
             {
@@ -907,7 +907,7 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
             streamCallbacks,
             streamOpts,
           )
-        } else if (resumeSqlWithChatRefinement) {
+        } else if (resumeSqlWithChatRefinement && sqlToken) {
           setSqlHitlOpen(false)
           const editedFromDialog = sqlHitlEdited.trim() || sqlHitlProposed.trim()
           result = await streamPulsecastResume(

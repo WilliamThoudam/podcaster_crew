@@ -7,7 +7,7 @@ export type GraphNodeStatus = 'idle' | 'running' | 'complete'
 
 interface TopologyNode {
   id: string
-  type: 'start' | 'end' | 'node'
+  type: 'start' | 'end' | 'node' | 'agent' | 'gate'
 }
 
 interface TopologyEdge {
@@ -22,8 +22,8 @@ interface TopologyResponse {
   edges: TopologyEdge[]
 }
 
-const NODE_WIDTH = 170
-const NODE_HEIGHT = 60
+const NODE_WIDTH = 184
+const NODE_HEIGHT = 64
 
 function applyDagreLayout(
   nodes: Node[],
@@ -31,7 +31,7 @@ function applyDagreLayout(
 ): { nodes: Node[]; edges: Edge[] } {
   const g = new dagre.graphlib.Graph()
   g.setDefaultEdgeLabel(() => ({}))
-  g.setGraph({ rankdir: 'TB', ranksep: 80, nodesep: 50 })
+  g.setGraph({ rankdir: 'TB', ranksep: 96, nodesep: 56 })
 
   for (const node of nodes) {
     g.setNode(node.id, { width: NODE_WIDTH, height: NODE_HEIGHT })
@@ -58,18 +58,40 @@ function applyDagreLayout(
 
 function prettyLabel(id: string): string {
   if (id === '__start__') return 'Start'
-  if (id === '__end__') return 'End'
-  return id
+  if (id === '__end__' || id.endsWith(':__end__')) return 'End'
+  const inner = id.includes(':') ? id.slice(id.indexOf(':') + 1) : id
+  return inner
     .split('_')
     .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
     .join(' ')
 }
 
+/** CSS modifier for agent border colors (matches pulsecast.css role vars). */
+function agentRoleModifier(id: string): string | undefined {
+  if (!id.startsWith('agents:')) return undefined
+  const s = id.slice('agents:'.length)
+  if (s === 'host_finalize') return 'host'
+  if (s === 'web_crawler') return 'web-crawler'
+  if (s === 'init_agents') return 'init'
+  return s.replace(/_/g, '-')
+}
+
+function topologyToRfType(t: TopologyNode['type']): string {
+  if (t === 'start' || t === 'end') return 'graphTerminal'
+  if (t === 'gate') return 'graphGate'
+  if (t === 'agent') return 'graphAgent'
+  return 'graphNode'
+}
+
 function buildReactFlowElements(topology: TopologyResponse) {
   const rfNodes: Node[] = topology.nodes.map((n) => ({
     id: n.id,
-    type: n.type === 'start' || n.type === 'end' ? 'graphTerminal' : 'graphNode',
-    data: { label: prettyLabel(n.id), nodeType: n.type },
+    type: topologyToRfType(n.type),
+    data: {
+      label: prettyLabel(n.id),
+      nodeType: n.type,
+      agentRole: n.type === 'agent' ? agentRoleModifier(n.id) : undefined,
+    },
     position: { x: 0, y: 0 },
   }))
 

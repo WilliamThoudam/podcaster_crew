@@ -584,6 +584,7 @@ async def build_resume_payload(
             discussion=snapshot.discussion,
             pipeline=snapshot.pipeline,
             user_declined_extra_sql=True,
+            on_progress=on_progress,
         )
         await _sync_pulsecast_session_after_hitl_answer(
             openai_user=snapshot.openai_user,
@@ -822,6 +823,7 @@ async def build_resume_payload(
         discussion=snapshot.discussion,
         pipeline=snapshot.pipeline,
         user_declined_extra_sql=False,
+        on_progress=on_progress,
     )
     await _sync_pulsecast_session_after_hitl_answer(
         openai_user=snapshot.openai_user,
@@ -1106,6 +1108,7 @@ async def build_resume_discussion_payload(
             discussion=snap.discussion,  # type: ignore[arg-type]
             pipeline=snap.pipeline or [],
             user_declined_extra_sql=False,
+            on_progress=on_progress,
         )
         await _sync_pulsecast_session_after_hitl_answer(
             openai_user=snap.openai_user,
@@ -1176,6 +1179,7 @@ async def build_resume_discussion_payload(
         discussion=snap.discussion,  # type: ignore[arg-type]
         pipeline=snap.pipeline or [],
         user_declined_extra_sql=False,
+        on_progress=on_progress,
     )
     await _sync_pulsecast_session_after_hitl_answer(
         openai_user=snap.openai_user,

@@ -19,6 +19,22 @@ async def emit_progress(cb: ProgressCallback | None, event: dict[str, Any]) -> N
         await maybe
 
 
+async def emit_agents_subgraph_node(
+    on_progress: ProgressCallback | None,
+    *,
+    subgraph_node: str,
+    entering: bool,
+) -> None:
+    """Mirror LangGraph subgraph node names (e.g. ``analyst`` -> ``agents:analyst``) for resume streams."""
+    await emit_progress(
+        on_progress,
+        {
+            "type": "graph_node_entered" if entering else "graph_node_exited",
+            "node": f"agents:{subgraph_node}",
+        },
+    )
+
+
 async def emit_text_chunks(
     *,
     on_progress: ProgressCallback | None,

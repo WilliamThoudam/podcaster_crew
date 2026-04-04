@@ -126,7 +126,7 @@ export function useGraphVisualization() {
     let cancelled = false
     async function load() {
       try {
-        const res = await fetch(`${apiBase()}/v1/graph/topology`)
+        const res = await fetch(`${apiBase()}/v1/graph/topology`, { cache: 'no-store' })
         if (!res.ok) throw new Error(`topology fetch failed: ${res.status}`)
         const data: TopologyResponse = await res.json()
         if (cancelled) return

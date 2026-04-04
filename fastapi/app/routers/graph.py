@@ -49,7 +49,8 @@ def _edge_condition_label(source: str, target: str) -> str | None:
 
 @router.get("/v1/graph/topology")
 async def graph_topology(response: Response):
-    response.headers["Cache-Control"] = "public, max-age=3600"
+    # Topology changes with graph code; avoid long browser cache (stale subgraph xray).
+    response.headers["Cache-Control"] = "no-store"
 
     compiled = get_compiled_graph()
     drawable = compiled.get_graph(xray=True)

@@ -78,6 +78,7 @@ export const TOPBAR_BY_SCREEN: Record<Screen, [string, string]> = {
   player: ['Podcast Player — Live Episode', 'South Region Decline Analysis'],
   transcript: ['Full Transcript', 'Multi-agent conversation log'],
   interaction: ['Interaction Panel', 'Ask questions about your data'],
+  graph: ['Graph Flow', 'Real-time LangGraph node status'],
 }
 
 export const ANALYST_SQL_SNIPPET = `SELECT region, SUM(sales_amount),

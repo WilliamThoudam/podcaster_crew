@@ -21,6 +21,7 @@ import { colorToRgb, cumulativeMsBeforeSegment, fmt, segmentIndexAtElapsed } fro
 import { pathForScreen } from '../../../routes/paths'
 import type { AgentState, PodcastRole, QaMessage, Screen } from '../../../types'
 import type { StreamProgressEvent } from '../../../services/api/pulsecastQa'
+import { useGraphVisualization } from './useGraphVisualization'
 
 const WAVEFORM_BARS = 80
 
@@ -65,6 +66,7 @@ function makePulsecastStreamHandlers(
   typingId: string,
   setQaMessages: Dispatch<SetStateAction<QaMessage[]>>,
   setThinkingRole: SetThinkingRole,
+  onGraphProgress: (event: StreamProgressEvent) => void,
 ) {
   const markThinking = (role: PodcastRole | null) => {
     setThinkingRole(role)
@@ -193,6 +195,10 @@ function makePulsecastStreamHandlers(
     })
   }
   const onProgress = (event: StreamProgressEvent) => {
+    if (event.type === 'graph_node_entered' || event.type === 'graph_node_exited') {
+      onGraphProgress(event)
+      return
+    }
     if (
       event.type === 'sql_approval_required' ||
       event.type === 'web_search_approval_required' ||
@@ -600,6 +606,7 @@ function makePulsecastStreamHandlers(
 }
 
 export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
+  const graphViz = useGraphVisualization()
   const [isPlaying, setIsPlaying] = useState(false)
   const [totalElapsed, setTotalElapsed] = useState(0)
   const [currentSegment, setCurrentSegment] = useState(0)
@@ -857,7 +864,12 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
       const typingId = newId()
       let stream: ReturnType<typeof makePulsecastStreamHandlers> | null = null
       try {
-        stream = makePulsecastStreamHandlers(typingId, setQaMessages, setThinkingRole)
+        stream = makePulsecastStreamHandlers(
+          typingId,
+          setQaMessages,
+          setThinkingRole,
+          graphViz.onGraphProgress,
+        )
         const conversation = [
           ...qaMessages
             .filter((m) => m.kind === 'user' && m.role === 'YOU' && typeof m.text === 'string')
@@ -1116,7 +1128,12 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
       const typingId = newId()
       let stream: ReturnType<typeof makePulsecastStreamHandlers> | null = null
       try {
-        stream = makePulsecastStreamHandlers(typingId, setQaMessages, setThinkingRole)
+        stream = makePulsecastStreamHandlers(
+          typingId,
+          setQaMessages,
+          setThinkingRole,
+          graphViz.onGraphProgress,
+        )
         const result = await streamPulsecastResume(
           {
             resume_token: token,
@@ -1245,7 +1262,12 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
       const typingId = newId()
       let stream: ReturnType<typeof makePulsecastStreamHandlers> | null = null
       try {
-        stream = makePulsecastStreamHandlers(typingId, setQaMessages, setThinkingRole)
+        stream = makePulsecastStreamHandlers(
+          typingId,
+          setQaMessages,
+          setThinkingRole,
+          graphViz.onGraphProgress,
+        )
         const result = await streamPulsecastResume(
           {
             resume_token: token,
@@ -1489,5 +1511,9 @@ export function usePulsecastApp(screen: Screen, navigate: NavigateFunction) {
     fmt,
     cumulativeMsBeforeSegment,
     analystSqlSnippet: ANALYST_SQL_SNIPPET,
+    graphNodes: graphViz.nodes,
+    graphEdges: graphViz.edges,
+    graphNodeStatusMap: graphViz.nodeStatusMap,
+    graphIsLoading: graphViz.isLoading,
   }
 }

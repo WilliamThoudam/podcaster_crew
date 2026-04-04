@@ -27,6 +27,9 @@ from app.services.pulsecast_completion_types import (
     CompletionStreamPaused,
 )
 from app.services.pulsecast_session_store import PulsecastSession, pulsecast_session_store
+from app.services.pulsecast_sse_emit import emit_progress
+
+_GRAPH_NODE_NAMES = frozenset({"planning", "sub_questions", "web_search", "agents"})
 
 
 class PulsecastState(TypedDict, total=False):
@@ -177,7 +180,7 @@ def _build_workflow() -> StateGraph:
 _compiled_graph: Any = None
 
 
-def _get_compiled_graph() -> Any:
+def get_compiled_graph() -> Any:
     """Return the compiled graph, creating it on first call.
 
     If a PostgresSaver checkpointer has been initialised (via ``init_postgres``),
@@ -205,7 +208,7 @@ async def run_pulsecast_completion_graph(
     req: OpenAIChatCompletionRequest,
     on_progress: Any | None,
 ) -> CompletionStreamOutcome:
-    graph = _get_compiled_graph()
+    graph = get_compiled_graph()
     sid = (req.user or "").strip()
 
     async def persist_pulsecast_session(session: PulsecastSession) -> None:
@@ -223,8 +226,26 @@ async def run_pulsecast_completion_graph(
     if sid:
         config["configurable"]["thread_id"] = sid
 
-    final = await graph.ainvoke({}, config=config)
-    out = final.get("outcome")
+    final_state: dict[str, Any] = {}
+    async for event in graph.astream_events({}, config=config, version="v2"):
+        kind = event["event"]
+        name = event.get("name", "")
+
+        if kind == "on_chain_start" and name in _GRAPH_NODE_NAMES:
+            await emit_progress(on_progress, {
+                "type": "graph_node_entered",
+                "node": name,
+            })
+        elif kind == "on_chain_end" and name in _GRAPH_NODE_NAMES:
+            await emit_progress(on_progress, {
+                "type": "graph_node_exited",
+                "node": name,
+            })
+            output = event.get("data", {}).get("output")
+            if isinstance(output, dict):
+                final_state.update(output)
+
+    out = final_state.get("outcome")
     if out is None:
         raise RuntimeError("Pulsecast graph finished without an outcome")
     return out

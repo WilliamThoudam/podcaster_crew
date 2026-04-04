@@ -7,6 +7,7 @@ export const paths = {
   player: '/player',
   transcript: '/transcript',
   interaction: '/interaction',
+  graph: '/graph',
 } as const satisfies Record<'login' | Screen, string>
 
 export function pathForScreen(screen: Screen): string {

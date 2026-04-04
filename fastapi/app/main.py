@@ -18,7 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.config import get_settings
-from app.routers import chat_completions
+from app.routers import chat_completions, graph
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +74,7 @@ app.add_middleware(
 )
 
 app.include_router(chat_completions.router)
+app.include_router(graph.router)
 
 
 def _openai_error(message: str, *, err_type: str, code: str | None = None, status_code: int = 400):

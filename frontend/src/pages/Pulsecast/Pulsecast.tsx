@@ -8,6 +8,7 @@ import { usePulsecastApp } from './hooks/usePulsecastApp'
 import { PulsecastMarkdown } from './components/PulsecastMarkdown'
 import { QaThinkingDots } from './components/QaThinkingDots'
 import { DiscussionApprovalModal } from './components/DiscussionApprovalModal'
+import { GraphFlowPanel } from './components/GraphFlowPanel'
 import './pulsecast.css'
 
 const SCREENS: { id: Screen; icon: string; title: string }[] = [
@@ -15,6 +16,7 @@ const SCREENS: { id: Screen; icon: string; title: string }[] = [
   { id: 'player', icon: '🎙️', title: 'Podcast Player' },
   { id: 'transcript', icon: '📝', title: 'Transcript' },
   { id: 'interaction', icon: '💬', title: 'Ask Questions' },
+  { id: 'graph', icon: '🔀', title: 'Graph Flow' },
 ]
 
 export function Pulsecast() {
@@ -608,6 +610,17 @@ export function Pulsecast() {
                 </div>
               </div>
             </div>
+          </div>
+
+          <div
+            className={`screen${app.screen === 'graph' ? ' active' : ''}`}
+            id="screen-graph"
+          >
+            <GraphFlowPanel
+              nodes={app.graphNodes}
+              edges={app.graphEdges}
+              nodeStatusMap={app.graphNodeStatusMap}
+            />
           </div>
         </div>
       </div>

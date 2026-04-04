@@ -247,6 +247,8 @@ export type StreamProgressEvent =
   | { type: 'sql_followup_declined' }
   | { type: 'web_search_declined' }
   | { type: 'duplicate_sub_question_skipped' }
+  | { type: 'graph_node_entered'; node: string }
+  | { type: 'graph_node_exited'; node: string }
 
 function apiBase(): string {
   const b = import.meta.env.VITE_PULSECAST_API_URL

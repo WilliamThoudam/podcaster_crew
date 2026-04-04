@@ -1,10 +1,11 @@
-export type Screen = 'dashboard' | 'player' | 'transcript' | 'interaction'
+export type Screen = 'dashboard' | 'player' | 'transcript' | 'interaction' | 'graph'
 
 export const PULSECAST_SCREENS = [
   'dashboard',
   'player',
   'transcript',
   'interaction',
+  'graph',
 ] as const satisfies readonly Screen[]
 
 export function isPulsecastScreen(param: string | undefined): param is Screen {

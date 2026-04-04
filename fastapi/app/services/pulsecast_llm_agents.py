@@ -35,6 +35,10 @@ from app.clients.serper_search import serper_google_search
 from app.services.data_quality_hints import sub_result_quality_hints
 from app.services.sub_question_tts_guard import is_valid_tts_sub_question
 
+import logging
+
+_logger = logging.getLogger(__name__)
+
 
 def _markdown_escape_cell(s: str) -> str:
     t = (s or "").replace("\n", " ").replace("\r", " ")
@@ -1147,6 +1151,31 @@ async def _run_llm_agents_linear(
     )
 
 
+async def _checkpoint_discussion_to_session(
+    session_id: str,
+    discussion: DiscussionState,
+    pipeline: list[AgentPipelineStep],
+) -> None:
+    """Persist current discussion state to the session store so that an
+    aborted stream can be continued from the last completed agent turn."""
+    try:
+        from app.services.pulsecast_session_store import pulsecast_session_store
+
+        prev = await pulsecast_session_store.get(session_id)
+        if prev is None:
+            return
+        disc_json: dict[str, Any] = {
+            "analyst": discussion.analyst.model_dump(mode="json"),
+            "discussion_turns": [t.model_dump(mode="json") for t in discussion.turns],
+        }
+        pipe_json = [p.model_dump(mode="json") for p in pipeline]
+        await pulsecast_session_store.save(
+            prev.model_copy(update={"last_discussion": disc_json, "last_pipeline": pipe_json})
+        )
+    except Exception:
+        _logger.warning("Failed to checkpoint discussion for session %s", session_id, exc_info=True)
+
+
 async def _run_llm_agents_moderated_discussion(
     *,
     settings: Settings,
@@ -1165,6 +1194,7 @@ async def _run_llm_agents_moderated_discussion(
     initial_pipeline: list[AgentPipelineStep] | None = None,
     start_round: int = 1,
     focus_for_next_round: str | None = None,
+    checkpoint_session_id: str | None = None,
 ) -> Union[LlmAgentsComplete, LlmAgentsPaused, LlmAgentsPausedWebSearch]:
     pipeline: list[AgentPipelineStep] = list(initial_pipeline) if initial_pipeline is not None else []
     turns: list[DiscussionTurn] = list(initial_discussion.turns) if initial_discussion is not None else []
@@ -1188,6 +1218,12 @@ async def _run_llm_agents_moderated_discussion(
             )
         )
         await _sse_discussion_analyst(on_progress, analyst_out)
+        if checkpoint_session_id:
+            await _checkpoint_discussion_to_session(
+                checkpoint_session_id,
+                DiscussionState(analyst=analyst_out, turns=[]),
+                pipeline,
+            )
 
     async def _run_one_discussant(
         *,
@@ -1221,6 +1257,12 @@ async def _run_llm_agents_moderated_discussion(
             )
         )
         await _sse_discussion_turn(on_progress, pr, round_index, out)
+        if checkpoint_session_id:
+            await _checkpoint_discussion_to_session(
+                checkpoint_session_id,
+                DiscussionState(analyst=analyst_out, turns=list(turns)),
+                list(pipeline),
+            )
         if discussant == "CHALLENGER" and allow_sql_approval_pause:
             pq = (out.new_question or "").strip()
             if (
@@ -1276,6 +1318,12 @@ async def _run_llm_agents_moderated_discussion(
                 )
             )
             await _sse_discussion_turn(on_progress, "WEB_CRAWLER", r, wc_out)
+            if checkpoint_session_id:
+                await _checkpoint_discussion_to_session(
+                    checkpoint_session_id,
+                    DiscussionState(analyst=analyst_out, turns=list(turns)),
+                    list(pipeline),
+                )
             if _serper_configured(settings):
                 queries = _web_search_queries_for_hitl(wc_out, analyst_plan)
                 queries = _filter_new_web_queries(ctx, queries)
@@ -1384,6 +1432,7 @@ async def run_llm_agents(
     user_declined_web_search: bool = False,
     allow_sql_approval_pause: bool = True,
     on_progress: AgentProgressCallback = None,
+    checkpoint_session_id: str | None = None,
 ) -> Union[LlmAgentsComplete, LlmAgentsPaused, LlmAgentsPausedWebSearch, LlmAgentsPausedDiscussion]:
     """
     Run internal enrichment, then HOST.
@@ -1464,6 +1513,7 @@ async def run_llm_agents(
                 allow_sql_approval_pause=allow_sql_approval_pause,
                 max_rounds=max_rounds,
                 on_progress=on_progress,
+                checkpoint_session_id=checkpoint_session_id,
             )
     return await _run_llm_agents_linear(
         settings=settings,

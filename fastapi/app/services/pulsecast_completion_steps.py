@@ -744,6 +744,7 @@ async def phase_agents_finalize(
         completed_web_results=completed_web_results,
         user_declined_web_search=user_declined_web_search,
         on_progress=on_progress,
+        checkpoint_session_id=(req.user or "").strip() or None,
     )
     if isinstance(agents_out, LlmAgentsPausedWebSearch):
         snap = WebSearchPausedSnapshot(

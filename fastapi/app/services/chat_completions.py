@@ -322,6 +322,7 @@ async def build_refine_payload(
                 initial_pipeline=prior_pipeline,
                 start_round=continuation_round,
                 focus_for_next_round=body.refinement.strip(),
+                checkpoint_session_id=sid,
             )
             return await _pause_from_discussion_agents_out(
                 settings=settings,
@@ -1055,6 +1056,7 @@ async def build_resume_discussion_payload(
                 allow_sql_approval_pause=True,
                 max_rounds=max_rounds,
                 on_progress=on_progress,
+                checkpoint_session_id=(snap.openai_user or "").strip() or None,
             )
         return await _pause_from_discussion_agents_out(
             settings=settings,
@@ -1125,6 +1127,7 @@ async def build_resume_discussion_payload(
             initial_pipeline=snap.pipeline,
             start_round=int(snap.next_round_index or 1),
             focus_for_next_round=(snap.focus_for_next_round or "").strip() or None,
+            checkpoint_session_id=(snap.openai_user or "").strip() or None,
         )
         return await _pause_from_discussion_agents_out(
             settings=settings,
